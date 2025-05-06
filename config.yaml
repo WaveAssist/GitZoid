@@ -34,12 +34,10 @@ nodes:
     entrypoint: post_comment.py
     run_after: [generate_review]
 
-environment:
-  default:
-    variables:
-      - name: github_ghp_token
-        value: your-github-token
-      - name: openai_key
-        value: your-openai-key
-      - name: anthropic_key
-        value: your-anthropic-key
+variables:
+    - name: github_ghp_token
+      value: your-github-token
+    - name: openai_key
+      value: your-openai-key
+    - name: anthropic_key
+      value: your-anthropic-key
