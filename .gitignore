@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+.env.*
+
+# Logs and debug
+*.log
+*.pot
+*.pyc
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.Python
+
+# Editor & IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test coverage and profiling
+coverage.xml
+.coverage
+.cache/
+.pytest_cache/
+
+# Jupyter notebooks (if any)
+.ipynb_checkpoints/
+
+# Local data files
+*.sqlite3
+*.db
+*.csv
+*.pkl
+*.json
+
+# Mac-specific
+*.DS_Store
