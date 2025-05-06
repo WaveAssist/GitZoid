@@ -12,8 +12,6 @@ Inputs:
 Outputs:
 - prs_to_review: same list, enriched with `comment`, `comment_generated`, `comment_posted`
 """
-
-
 from openai import OpenAI
 import anthropic
 import waveassist
@@ -24,31 +22,59 @@ TOKEN_MULTIPLIER = 2.5
 # Initialize WaveAssist
 waveassist.init()
 
-
-def _init_client(fetch_key: str, client_cls):
+def _init_openai_client():
     """
-    Attempt to fetch an API key and initialize the client.
+    Initialize and validate OpenAI client.
     Returns (client_instance or None, availability_flag).
     """
-    api_key = waveassist.fetch_data(fetch_key)
-    if api_key is None:
-        print(f"⚠️ No API key found for {client_cls.__name__}.")
+    api_key = waveassist.fetch_data("openai_key")
+    if not api_key:
+        print("⚠️ No API key found for OpenAI.")
+        return None, False
+    if not api_key.startswith("sk-"):
+        print("❌ Invalid OpenAI API key format.")
         return None, False
     try:
-        return client_cls(api_key=api_key), True
+        client = OpenAI(api_key=api_key)
+        # Validate by listing models
+        client.models.list()
+        return client, True
     except Exception as e:
-        print(f"❌ Failed to initialize {client_cls.__name__}: {e}")
-    return None, False
+        print(f"❌ OpenAI client initialization failed: {e}")
+        return None, False
+
+
+def _init_anthropic_client():
+    """
+    Initialize and validate Anthropic client.
+    Returns (client_instance or None, availability_flag).
+    """
+    api_key = waveassist.fetch_data("anthropic_key")
+    if not api_key:
+        print("⚠️ No API key found for Anthropic.")
+        return None, False
+    if not api_key.startswith("sk-"):
+        print("❌ Invalid Anthropic API key format.")
+        return None, False
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        # Validate by listing available models
+        client.get_available_models()
+        return client, True
+    except Exception as e:
+        print(f"❌ Anthropic client initialization failed: {e}")
+        return None, False
 
 
 # Set up clients
-openai_client, openai_avail = _init_client("openai_key", OpenAI)
+openai_client, openai_avail = _init_openai_client()
 if openai_avail:
     print("✅ OpenAI client ready.")
 
-anthropic_client, anthropic_avail = _init_client("anthropic_key", anthropic.Anthropic)
+anthropic_client, anthropic_avail = _init_anthropic_client()
 if anthropic_avail:
     print("✅ Anthropic client ready.")
+
 
 if not (openai_avail or anthropic_avail):
     raise RuntimeError("❌ Neither OpenAI nor Anthropic key is available – nothing to do.")
