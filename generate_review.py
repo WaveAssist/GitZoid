@@ -120,32 +120,32 @@ def get_prompt(review_pr):
   ---
 
   ### 📝 Summary
-  ???? Briefly explain what this PR does and the nature of the changes. Use a **numbered list**.
+   Briefly explain what this PR does and the nature of the changes. Use a **numbered list**.
 
   ### ⚠️ Potential Issues
-  ???? Identify possible bugs, breaking changes, missing edge cases, or best practice violations. Use a **numbered list**.
+   Identify possible bugs, breaking changes, missing edge cases, or best practice violations. Use a **numbered list**.
 
   ### 🚀 Potential Optimizations
-  ???? Suggest improvements to performance, readability, or simplicity. Use a **numbered list**.
+   Suggest improvements to performance, readability, or simplicity. Use a **numbered list**.
 
   ### 💡 Suggestions & Comments
-  ???? Optional: Praise good practices, suggest tests, or style improvements. Use a **numbered list**.
+   Optional: Praise good practices, suggest tests, or style improvements. Use a **numbered list**.
 
   ---
 
   ✅ **Tone**: Friendly and to the point. Use emojis where appropriate.
   ⛔ **Avoid**: Repeating raw code or including anything outside the review comment itself.  
-  ???? **Important**: The output will be posted directly as a GitHub PR comment. Dont include anything else.
-
+      **Emoji**: Dont write ????, use emoji icons at those places if needed. 
+      **Important**: The output will be posted directly as a GitHub PR comment. Dont include anything else.
   ---
 
-  ### ???? PR Metadata:
+  ###  PR Metadata:
   - PR Number: {review_pr["pr_number"]}
   - Title: {review_pr["title"]}
   - Description: {review_pr["body"]}
   - Target Branch: {review_pr["target_branch"]}
 
-  ### ????️ Changed Files and Diffs:
+  ### Changed Files and Diffs:
   {format_changed_files(review_pr['files'], int(review_pr["max_input_tokens"] * TOKEN_MULTIPLIER))}
   """
 
