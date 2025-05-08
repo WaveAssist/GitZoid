@@ -2,6 +2,8 @@
 
 ![GitZoid Logo](https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Deploy on WaveAssist](https://img.shields.io/badge/Deploy%20on-WaveAssist-1D2430?logo=vercel&logoColor=white&style=for-the-badge)](https://waveassist.io/deploy/gitzoid)
+
 
 ## Overview
 
