@@ -2,7 +2,7 @@
 
 ![GitZoid Logo](https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Deploy on WaveAssist](https://img.shields.io/badge/Deploy%20on-WaveAssist-1D2430?logo=vercel&logoColor=white&style=for-the-badge)](https://waveassist.io/deploy/gitzoid)
+[![Deploy on WaveAssist](https://img.shields.io/badge/Deploy%20on-WaveAssist-1D2430?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyBmaWxsPSJ3aGl0ZSIgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiB2aWV3Qm94PSIwIDAgMjQgMjQiPjxwYXRoIGQ9Ik0xMiAybDkgMTYtOSA1LTktNSA5LTE2eiIvPjwvc3ZnPg==)](https://waveassist.io/deploy/gitzoid)
 
 
 ## Overview
