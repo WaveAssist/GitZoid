@@ -9,10 +9,6 @@ nodes:
   - id: initialize_repositories
     name: InitializeRepositories
     entrypoint: initialize_repositories.py
-    schedule:
-      interval:
-        every: 365
-        period: days
     starting_node: true
 
   - id: fetch_pull_requests
