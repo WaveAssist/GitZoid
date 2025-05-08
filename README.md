@@ -3,10 +3,11 @@
 ![GitZoid Logo](https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-
 ## Overview
 
 GitZoid is an **open-source** GitHub bot that automates pull-request reviews and comments using AI models (OpenAI’s GPT-4o-mini or Anthropic’s Claude 3.5). By default, it’s designed to run on the [WaveAssist](https://waveassist.io) platform—which handles node orchestration, scheduling, secrets/variable storage, and hosting—but you can also run it as a standalone Python application.
+
+👉 You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https://gitzoid.com) — no setup required.
 
 ## Features
 
@@ -44,14 +45,6 @@ GitZoid is an **open-source** GitHub bot that automates pull-request reviews and
    * Posts any new `comment` to GitHub
    * Updates `prs_to_review` flags and `repositories` → `last_checked`
 
-Here’s the updated **Deployment** section for your `README.md`, incorporating:
-
-* the 365-day schedule for `InitializeRepositories`
-* simplified instructions for adding nodes, variables, and libraries
-* and a note on the upcoming **One-Click Deploy** feature.
-
----
-
 ## Deployment / How to Run
 
 ### Option 1: Deploy with WaveAssist (Recommended)
@@ -66,8 +59,8 @@ Deploy GitZoid effortlessly on [WaveAssist](https://waveassist.io):
 
    * `InitializeRepositories` (entrypoint: `initialize_repositories.py`, **run every 365 days**)
    * `FetchPRs` (entrypoint: `fetch_pull_requests.py`, **every 5 minutes**)
-   * `GenerateReview` (entrypoint: `generate_review.py`, **run\_after: FetchPRs**)
-   * `PostComment` (entrypoint: `post_comment.py`, **run\_after: GenerateReview**)
+   * `GenerateReview` (entrypoint: `generate_review.py`, **run_after: FetchPRs**)
+   * `PostComment` (entrypoint: `post_comment.py`, **run_after: GenerateReview**)
 
 4. Paste the contents of each `.py` file into its respective node
 
