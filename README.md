@@ -3,6 +3,8 @@
 ![GitZoid Logo](https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B?style=for-the-badge)](https://waveassist.io/templates/gitzoid-template)
+
 ## Overview
 
 GitZoid is an **open-source** GitHub bot that automates pull-request reviews and comments using AI models (OpenAI’s GPT-4o-mini or Anthropic’s Claude 3.5). By default, it’s designed to run on the [WaveAssist](https://waveassist.io) platform—which handles node orchestration, scheduling, secrets/variable storage, and hosting—but you can also run it as a standalone Python application.
@@ -24,61 +26,73 @@ GitZoid is an **open-source** GitHub bot that automates pull-request reviews and
 * **Configurable Models & Branches**
   Per-repo `target_branch` and `model` settings.
 
+---
+
+## 🚀 One-Click Deploy with WaveAssist
+
+Deploy GitZoid instantly using the button below:
+
+[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B?style=for-the-badge)](https://waveassist.io/templates/gitzoid-template)
+
+### How to Use:
+
+1. **Deploy** by clicking on this link: [Deploy GitZoid](https://waveassist.io/templates/gitzoid-template).
+   - You’ll be taken to WaveAssist, where you can customize the deployment.
+   - **Note**: You need a WaveAssist account (free forever tier available).
+
+2. Once deployed, go to your project and go to the **Variables tab** (you'll see it pre-created) and **paste in your values for**:
+   - `github_ghp_token`
+   - `openai_key` or `anthropic_key`
+
+3. Now, go to the **Nodes tab**:
+   - Trigger `InitializeRepositories` once (only needed the first time).
+   - Review the `repositories` variable if you'd like to prune/edit.
+
+4. Trigger `FetchPRs`. Within seconds, GitZoid will:
+   - Fetch PRs
+   - Review them using AI
+   - Post comments directly on your GitHub PRs
+
+5. ✅ Once everything works, click the **Deploy** button in WaveAssist to make it run on schedule automatically.
+
+---
+
+### Optional: Enable Real-Time Reviews via GitHub Webhooks
+
+Want GitZoid to respond to new PRs in real-time?
+
+- Go to the **`FetchPRs` node** in WaveAssist
+- Copy the **Webhook URL**
+- Add it as a GitHub webhook for your repo:
+  - Events to select: `Pull requests`
+  - Method: `POST`
+  - Content-Type: `application/json`
+
+GitZoid will now review PRs as soon as they're opened.
+
+---
+
+## Manual Deployment (Advanced)
+
+You can also run each script locally or schedule with your own orchestrator (like cron or Airflow). But WaveAssist is easier.
+
 ## How It Works
 
-1. **Initialize Repositories** (`initialize_repositories.py`, one-time)
+1. **Initialize Repositories** (`initialize_repositories.py`)
+   - Trigger-only. Seeds your repository list to the `repositories` variable.
 
-   * Reads your configured repo list and seeds it under the WaveAssist key `repositories`.
-2. **Fetch Pull Requests** (`fetch_pull_requests.py`, scheduled every 5 minutes)
+2. **Fetch Pull Requests** (`fetch_pull_requests.py`)
+   - Scheduled or webhook-triggered.
+   - Loads your repos and GHP token.
+   - Fetches open PRs and diffs → stores them in `prs_to_review`.
 
-   * Loads `repositories` and `github_access_token`
-   * Fetches open PR metadata and diffs
-   * Stores results under `prs_to_review`
-3. **Generate Reviews** (`generate_review.py`, runs after PR-fetch)
+3. **Generate Reviews** (`generate_review.py`)
+   - Run after FetchPRs.
+   - Uses AI to generate suggestions/comments.
+   - Adds review to each PR entry.
 
-   * Loads `prs_to_review` and AI keys
-   * Builds structured prompts
-   * Calls OpenAI/Anthropic, writes `comment` into each PR object
-4. **Post Comments** (`post_comment.py`, runs after review)
+4. **Post Comments** (`post_comment.py`)
+   - Posts the AI review back to the PR on GitHub.
 
-   * Loads `prs_to_review` and `github_access_token`
-   * Posts any new `comment` to GitHub
-   * Updates `prs_to_review` flags and `repositories` → `last_checked`
+---
 
-## Deployment / How to Run
-
-### Option 1: Deploy with WaveAssist (Recommended)
-
-Deploy GitZoid effortlessly on [WaveAssist](https://waveassist.io):
-
-1. Visit [waveassist.io](https://waveassist.io)
-
-2. **Create a free account** if you don’t already have one
-
-3. Set up the following four nodes:
-
-   * `InitializeRepositories` (entrypoint: `initialize_repositories.py`, **run every 365 days**)
-   * `FetchPRs` (entrypoint: `fetch_pull_requests.py`, **every 5 minutes**)
-   * `GenerateReview` (entrypoint: `generate_review.py`, **run_after: FetchPRs**)
-   * `PostComment` (entrypoint: `post_comment.py`, **run_after: GenerateReview**)
-
-4. Paste the contents of each `.py` file into its respective node
-
-5. Create 3 variables:
-
-   * `github_ghp_token`
-   * `openai_key`
-   * `anthropic_key` (Optional)
-
-6. Add 2 required libraries: (Both are required)
-
-   * `openai==1.14.3`
-   * `anthropic==0.49.0`
-
-✅ Run! GitZoid will now fetch PRs, review them with AI, and post comments on GitHub—all on autopilot.
-
-> 🚀 **One-Click Deploy via WaveAssist UI – Coming Soon**
-
-### Option 2: Standalone Python
-
-You can also run each script locally or through your own scheduler (e.g., cron, Airflow, etc.).
