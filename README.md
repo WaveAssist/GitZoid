@@ -54,7 +54,7 @@ GitZoid offers multiple ways to integrate AI-powered code reviews into your work
 
 <p>
   <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
-    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="280" />
+    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="230" />
   </a>
 </p>
 
