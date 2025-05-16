@@ -1,60 +1,57 @@
 <p align="center">
-  <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid_logo_dark.png" alt="GitZoid Logo" width="200" />
+  <img src="https://gitzoid.com/logo.png" alt="GitZoid Logo" width="200" />
 </p>
-
-<h1 align="center">GitZoid: Open-Source AI-Powered GitHub PR Reviewer</h1>
-
-<p align="center">
-  <a href="https://waveassist.io/templates/gitzoid-template">
-    <img src="https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B" alt="Deploy with WaveAssist" />
-  </a>
-  <img src="https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue" alt="GitZoid Badge" />
-  <a href="https://opensource.org/licenses/MIT">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" />
-  </a>
-  <a href="https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic">
-    <img src="https://img.shields.io/badge/Guide-How_to_Get_GitHub_Token-red" alt="How to get GitHub token guide" />
-  </a>
-</p>
-
----
-
-## Overview
-
-GitZoid is an **open-source** GitHub bot that automates pull-request reviews and comments using AI models (OpenAI’s GPT-4o-mini or Anthropic’s Claude 3.5). By default, it’s designed to run on the [WaveAssist](https://waveassist.io) platform—which handles node orchestration, scheduling, secrets/variable storage, and hosting—but you can also run it as a standalone Python application.
-
-You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https://gitzoid.com) — no setup required.
 
 <p align="center">
   <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid-og-home.png" alt="GitZoid UI Preview" width="100%" />
 </p>
 
-## Features
+<h1 align="center">GitZoid: Open-Source AI-Powered GitHub PR Reviewer ⚡</h1>
 
-* **One-Time Repo Initialization**
-  Seed your list of repositories into WaveAssist or a local store.
-* **Automated PR Monitoring**
-  Polls your repos for new pull requests at configurable intervals.
-* **AI-Powered Code Reviews**
-  Uses OpenAI or Anthropic to generate structured feedback.
-* **Structured Feedback**
-  Sections for Summary, Potential Issues, Optimizations, and Suggestions.
-* **GitHub Integration**
-  Posts generated reviews directly as comments on your PRs.
-* **Configurable Models & Branches**
-  Per-repo `target_branch` and `model` settings.
+<p align="center">
+  <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
+    <img src="https://img.shields.io/badge/🚀%20Deploy_on_WaveAssist-007F3B?style=for-the-badge" alt="Deploy on WaveAssist" />
+  </a>
+  <a href="https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic" target="_blank">
+    <img src="https://img.shields.io/badge/📘%20GitHub_Token_Guide-1E88E5?style=for-the-badge" alt="GitHub Token Guide" />
+  </a>
+</p>
 
 ---
 
-## 3 Ways to Get Your PRs Reviewed with GitZoid
+## Overview 📦
+
+GitZoid is an **open-source** GitHub bot that automates pull-request reviews and comments using AI models (OpenAI’s GPT-4o-mini or Anthropic’s Claude 3.5). By default, it’s designed to run on the [WaveAssist](https://waveassist.io) platform—which handles node orchestration, scheduling, secrets/variable storage, and hosting—but you can also run it as a standalone Python application.
+
+👉 Try the hosted version at [https://gitzoid.com](https://gitzoid.com) — no setup required.
+
+---
+
+## 🔧 Features
+
+* **One-Time Repo Initialization**
+* **Automated PR Monitoring**
+* **AI-Powered Code Reviews**
+* **Structured Feedback** (Summary, Issues, Optimizations)
+* **GitHub Integration**
+* **Configurable Models & Branches**
+
+---
+
+##  3 Ways to Get Your PRs Reviewed with GitZoid
 
 GitZoid offers multiple ways to integrate AI-powered code reviews into your workflow:
 
-### 1. One-Click Deploy on WaveAssist (Recommended)
+---
 
-<a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
-  <img src="https://img.shields.io/badge/🚀%20Deploy_on_WaveAssist-007F3B?style=for-the-badge" alt="Deploy with WaveAssist" />
-</a>
+### 🚀 1. One-Click Deploy on WaveAssist
+
+<p>
+  <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
+    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="280" />
+  </a>
+</p>
+
 
 Deploy GitZoid instantly on [WaveAssist](https://waveassist.io) — a zero-infrastructure automation platform that handles orchestration, scheduling, secrets, and hosting for you.
 
@@ -69,13 +66,13 @@ Deploy GitZoid instantly on [WaveAssist](https://waveassist.io) — a zero-infra
    - Fetch PRs
    - Review them using AI
    - Post structured comments directly on your GitHub PRs
-5. Finally, click **Deploy** to schedule this automation
+5. Click **Deploy** to schedule the automation
 
 ✅ You’re now running GitZoid on autopilot.
 
 ---
 
-### 2. Use GitZoid.com (No API Key Required)
+### 🌐 2. Use GitZoid.com (No API Key Required)
 
 Want to get started without OpenAI or Anthropic keys?
 
@@ -83,13 +80,11 @@ Just go to [gitzoid.com](https://gitzoid.com), enter:
 - Your GitHub token
 - The list of repositories to monitor
 
-GitZoid will:
-- Review PRs using hosted AI keys
-- Post structured comments to your PRs — no setup required
+GitZoid will handle the rest using our hosted AI keys.
 
 ---
 
-### 3. Manual Deployment (Advanced Users)
+### ⚙️ 3. Manual Deployment (Advanced Users)
 
 Prefer running GitZoid on your own infra?
 
@@ -104,6 +99,22 @@ Scripts:
 - `generate_review.py`: uses AI to generate feedback
 - `post_comment.py`: posts the feedback as PR comments
 
-You control everything — ideal for power users or air-gapped environments.
+---
 
+## ⚙️ How It Works
 
+1. **Initialize Repositories** (`initialize_repositories.py`)  
+   Seeds your repository list into a variable store
+
+2. **Fetch Pull Requests** (`fetch_pull_requests.py`)  
+   Loads repos, fetches open PRs + diffs → stores them in memory
+
+3. **Generate Reviews** (`generate_review.py`)  
+   Uses AI to write feedback for each PR
+
+4. **Post Comments** (`post_comment.py`)  
+   Posts feedback back to GitHub PRs as a comment
+
+---
+
+Built with ❤️ by the WaveAssist team. Want help or integrations? [Say hello](https://waveassist.io).
