@@ -117,5 +117,6 @@ Scripts:
 * **Configurable Models & Branches**
   Per-repo `target_branch` and `model` settings.
 
+---
 
 Built with ❤️ by the WaveAssist team. Want help or integrations? [Say hello](https://waveassist.io).
