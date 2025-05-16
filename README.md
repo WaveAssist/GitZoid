@@ -29,24 +29,9 @@ You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https
   <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid-og-home.png" alt="GitZoid UI Preview" width="100%" />
 </p>
 
-## Features
-
-* **One-Time Repo Initialization**
-  Seed your list of repositories into WaveAssist or a local store.
-* **Automated PR Monitoring**
-  Polls your repos for new pull requests at configurable intervals.
-* **AI-Powered Code Reviews**
-  Uses OpenAI or Anthropic to generate structured feedback.
-* **Structured Feedback**
-  Sections for Summary, Potential Issues, Optimizations, and Suggestions.
-* **GitHub Integration**
-  Posts generated reviews directly as comments on your PRs.
-* **Configurable Models & Branches**
-  Per-repo `target_branch` and `model` settings.
-
 ---
 
-## 3 Ways to Get Your PRs Reviewed with GitZoid
+## Three Ways to Get Your PRs Reviewed with GitZoid
 
 GitZoid offers multiple ways to integrate AI-powered code reviews into your workflow:
 
@@ -54,20 +39,23 @@ GitZoid offers multiple ways to integrate AI-powered code reviews into your work
 
 <p>
   <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
-    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="200" />
+    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="230" />
   </a>
 </p>
 
 
 Deploy GitZoid instantly on [WaveAssist](https://waveassist.io) — a zero-infrastructure automation platform that handles orchestration, scheduling, secrets, and hosting for you.
 
+> 🔐 You may be prompted to log in or create a free WaveAssist account before continuing.
+
 #### How to Use:
 
 1. Click the button above or go to [waveassist.io/templates/gitzoid-template](https://waveassist.io/templates/gitzoid-template)
-2. Paste your credentials under the **Data tab**:
+2. Paste your credentials under the **Variable tab**:
    - `github_ghp_token`
    - `openai_key` or `anthropic_key`
-3. Run the `InitializeRepositories` node once
+3. Run the `InitializeRepositories` node once  
+   ➤ Then edit the `repositories` variable if needed to select the right repositories.
 4. Then run `FetchPRs` — GitZoid will:
    - Fetch PRs
    - Review them using AI
@@ -98,11 +86,11 @@ GitZoid will:
 
 ---
 
-### 3. Manual Deployment (Advanced Users)
+### 3. Manual Deployment
 
-Prefer running GitZoid on your own infra?
+Want to run GitZoid on your own infrastructure?
 
-Clone this repo and run the scripts using:
+Clone this repo and use your preferred scheduler such as:
 - Cron
 - GitHub Actions
 - Airflow or any scheduler
@@ -112,9 +100,22 @@ Scripts:
 - `fetch_pull_requests.py`: fetches new PRs
 - `generate_review.py`: uses AI to generate feedback
 - `post_comment.py`: posts the feedback as PR comments
-
-You control everything — ideal for power users or air-gapped environments.
-
 ---
+
+## Features
+
+* **One-Time Repo Initialization**
+  Seed your list of repositories into WaveAssist or a local store.
+* **Automated PR Monitoring**
+  Polls your repos for new pull requests at configurable intervals.
+* **AI-Powered Code Reviews**
+  Uses OpenAI or Anthropic to generate structured feedback.
+* **Structured Feedback**
+  Sections for Summary, Potential Issues, Optimizations, and Suggestions.
+* **GitHub Integration**
+  Posts generated reviews directly as comments on your PRs.
+* **Configurable Models & Branches**
+  Per-repo `target_branch` and `model` settings.
+
 
 Built with ❤️ by the WaveAssist team. Want help or integrations? [Say hello](https://waveassist.io).
