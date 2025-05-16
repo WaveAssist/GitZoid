@@ -46,71 +46,64 @@ You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https
 
 ---
 
-## One-Click Deploy with WaveAssist
+## 3 Ways to Get Your PRs Reviewed with GitZoid
 
-Deploy GitZoid instantly using the button below:
+GitZoid offers multiple ways to integrate AI-powered code reviews into your workflow:
 
-[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B)](https://waveassist.io/templates/gitzoid-template)
+### 1. One-Click Deploy on WaveAssist (Recommended)
 
-### How to Use:
+<a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
+  <img src="https://img.shields.io/badge/🚀%20Deploy_on_WaveAssist-007F3B?style=for-the-badge" alt="Deploy with WaveAssist" />
+</a>
 
-1. **Deploy** by clicking on this link: [Deploy GitZoid](https://waveassist.io/templates/gitzoid-template).
-   - You’ll be taken to WaveAssist, where you can customize the deployment.
-   - **Note**: You need a WaveAssist account (free forever tier available).
+Deploy GitZoid instantly on [WaveAssist](https://waveassist.io) — a zero-infrastructure automation platform that handles orchestration, scheduling, secrets, and hosting for you.
 
-2. Once deployed, go to your project and go to the **Variables tab** (you'll see it pre-created) and **paste in your values for**:
+#### How to Use:
+
+1. Click the button above or go to [waveassist.io/templates/gitzoid-template](https://waveassist.io/templates/gitzoid-template)
+2. Paste your credentials under the **Data tab**:
    - `github_ghp_token`
    - `openai_key` or `anthropic_key`
-
-3. Now, go to the **Nodes tab**:
-   - Trigger `InitializeRepositories` once (only needed the first time).
-   - Review the `repositories` variable if you'd like to prune/edit.
-
-4. Trigger `FetchPRs`. Within seconds, GitZoid will:
+3. Run the `InitializeRepositories` node once
+4. Then run `FetchPRs` — GitZoid will:
    - Fetch PRs
    - Review them using AI
-   - Post comments directly on your GitHub PRs
+   - Post structured comments directly on your GitHub PRs
+5. Finally, click **Deploy** to schedule this automation
 
-5. Once everything works, click the **Deploy** button in WaveAssist to make it run on schedule automatically.
-
----
-
-### Optional: Enable Real-Time Reviews via GitHub Webhooks
-
-Want GitZoid to respond to new PRs in real-time?
-
-- Go to the **`FetchPRs` node** in WaveAssist
-- Copy the **Webhook URL**
-- Add it as a GitHub webhook for your repo:
-  - Events to select: `Pull requests`
-  - Method: `POST`
-  - Content-Type: `application/json`
-
-GitZoid will now review PRs as soon as they're opened.
+✅ You’re now running GitZoid on autopilot.
 
 ---
 
-## Manual Deployment (Advanced)
+### 2. Use GitZoid.com (No API Key Required)
 
-You can also run each script locally or schedule with your own orchestrator (like cron or Airflow). But WaveAssist is easier.
+Want to get started without OpenAI or Anthropic keys?
 
-## How It Works
+Just go to [gitzoid.com](https://gitzoid.com), enter:
+- Your GitHub token
+- The list of repositories to monitor
 
-1. **Initialize Repositories** (`initialize_repositories.py`)
-   - Trigger-only. Seeds your repository list to the `repositories` variable.
-
-2. **Fetch Pull Requests** (`fetch_pull_requests.py`)
-   - Scheduled or webhook-triggered.
-   - Loads your repos and GHP token.
-   - Fetches open PRs and diffs → stores them in `prs_to_review`.
-
-3. **Generate Reviews** (`generate_review.py`)
-   - Run after FetchPRs.
-   - Uses AI to generate suggestions/comments.
-   - Adds review to each PR entry.
-
-4. **Post Comments** (`post_comment.py`)
-   - Posts the AI review back to the PR on GitHub.
+GitZoid will:
+- Review PRs using hosted AI keys
+- Post structured comments to your PRs — no setup required
 
 ---
+
+### 3. Manual Deployment (Advanced Users)
+
+Prefer running GitZoid on your own infra?
+
+Clone this repo and run the scripts using:
+- Cron
+- GitHub Actions
+- Airflow or any scheduler
+
+Scripts:
+- `initialize_repositories.py`: seeds your repos
+- `fetch_pull_requests.py`: fetches new PRs
+- `generate_review.py`: uses AI to generate feedback
+- `post_comment.py`: posts the feedback as PR comments
+
+You control everything — ideal for power users or air-gapped environments.
+
 
