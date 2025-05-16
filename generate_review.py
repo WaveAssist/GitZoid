@@ -113,7 +113,7 @@ def format_changed_files(files, max_chars=25000):
 
 def get_prompt(review_pr):
   return f"""
-  ????‍???? You are an experienced senior software engineer reviewing a GitHub pull request. Below is the PR metadata and code diffs.
+You are an experienced senior software engineer reviewing a GitHub pull request. Below is the PR metadata and code diffs.
 
   ✍️ Your task is to generate a **structured, clear, concise, and friendly** PR review comment. Use the following format:
 
@@ -135,7 +135,6 @@ def get_prompt(review_pr):
 
   ✅ **Tone**: Friendly and to the point. Use emojis where appropriate.
   ⛔ **Avoid**: Repeating raw code or including anything outside the review comment itself.  
-      **Emoji**: Dont write ????, use emoji icons at those places if needed. 
       **Important**: The output will be posted directly as a GitHub PR comment. Dont include anything else.
   ---
 
