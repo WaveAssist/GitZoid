@@ -1,15 +1,33 @@
-# GitZoid: Open-Source AI-Powered GitHub PR Reviewer
+<p align="center">
+  <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid_logo_dark.png" alt="GitZoid Logo" width="200" />
+</p>
 
-![GitZoid Logo](https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<h1 align="center">GitZoid: Open-Source AI-Powered GitHub PR Reviewer</h1>
 
-[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B?style=for-the-badge)](https://waveassist.io/templates/gitzoid-template)
+<p align="center">
+  <a href="https://waveassist.io/templates/gitzoid-template">
+    <img src="https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B" alt="Deploy with WaveAssist" />
+  </a>
+  <img src="https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue" alt="GitZoid Badge" />
+  <a href="https://opensource.org/licenses/MIT">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" />
+  </a>
+  <a href="https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic">
+    <img src="https://img.shields.io/badge/Guide-How_to_Get_GitHub_Token-red" alt="How to get GitHub token guide" />
+  </a>
+</p>
+
+---
 
 ## Overview
 
 GitZoid is an **open-source** GitHub bot that automates pull-request reviews and comments using AI models (OpenAI’s GPT-4o-mini or Anthropic’s Claude 3.5). By default, it’s designed to run on the [WaveAssist](https://waveassist.io) platform—which handles node orchestration, scheduling, secrets/variable storage, and hosting—but you can also run it as a standalone Python application.
 
-👉 You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https://gitzoid.com) — no setup required.
+You can try out the **hosted version** of GitZoid at [https://gitzoid.com](https://gitzoid.com) — no setup required.
+
+<p align="center">
+  <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid-og-home.png" alt="GitZoid UI Preview" width="100%" />
+</p>
 
 ## Features
 
@@ -28,11 +46,11 @@ GitZoid is an **open-source** GitHub bot that automates pull-request reviews and
 
 ---
 
-## 🚀 One-Click Deploy with WaveAssist
+## One-Click Deploy with WaveAssist
 
 Deploy GitZoid instantly using the button below:
 
-[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B?style=for-the-badge)](https://waveassist.io/templates/gitzoid-template)
+[![Deploy with WaveAssist](https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B)](https://waveassist.io/templates/gitzoid-template)
 
 ### How to Use:
 
@@ -53,7 +71,7 @@ Deploy GitZoid instantly using the button below:
    - Review them using AI
    - Post comments directly on your GitHub PRs
 
-5. ✅ Once everything works, click the **Deploy** button in WaveAssist to make it run on schedule automatically.
+5. Once everything works, click the **Deploy** button in WaveAssist to make it run on schedule automatically.
 
 ---
 
