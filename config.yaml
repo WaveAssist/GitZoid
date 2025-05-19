@@ -16,7 +16,7 @@ nodes:
     entrypoint: fetch_pull_requests.py
     schedule:
       interval:
-        every: 5
+        every: 2
         period: minutes
     starting_node: true
 
