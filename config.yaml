@@ -6,28 +6,28 @@ requirements:
   - anthropic==0.50.0
 
 nodes:
-  - id: initialize_repositories
+  - key: initialize_repositories
     name: InitializeRepositories
-    entrypoint: initialize_repositories.py
+    file_name: initialize_repositories.py
     starting_node: true
 
-  - id: fetch_pull_requests
+  - key: fetch_pull_requests
     name: FetchPRs
-    entrypoint: fetch_pull_requests.py
+    file_name: fetch_pull_requests.py
     schedule:
       interval:
         every: 2
         period: minutes
     starting_node: true
 
-  - id: generate_review
+  - key: generate_review
     name: GenerateReview
-    entrypoint: generate_review.py
+    file_name: generate_review.py
     run_after: [fetch_pull_requests]
 
-  - id: post_comment
+  - key: post_comment
     name: PostComment
-    entrypoint: post_comment.py
+    file_name: post_comment.py
     run_after: [generate_review]
 
 variables:
