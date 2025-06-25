@@ -1,19 +1,4 @@
-"""
-WaveAssist Node: Generate AI-Powered PR Review Comments with Fallbacks
-
-This node generates review comments for GitHub PRs using OpenAI or Anthropic,
-depending on which API keys are available. If neither key is valid, it aborts.
-
-Inputs:
-- prs_to_review: list of PR dicts
-- gitzoid_openai_key: optional OpenAI API key (placeholder if unset)
-- gitzoid_anthropic_key: optional Anthropic API key (placeholder if unset)
-
-Outputs:
-- prs_to_review: same list, enriched with `comment`, `comment_generated`, `comment_posted`
-"""
 from openai import OpenAI
-import anthropic
 import waveassist
 
 # Constants
@@ -22,62 +7,29 @@ TOKEN_MULTIPLIER = 2.5
 # Initialize WaveAssist
 waveassist.init()
 
-def _init_openai_client():
+def _init_openrouter_client():
     """
-    Initialize and validate OpenAI client.
-    Returns (client_instance or None, availability_flag).
+    Initialize and validate the OpenRouter client via the OpenAI SDK.
     """
-    api_key = waveassist.fetch_data("openai_key")
-    if not api_key:
-        print("⚠️ No API key found for OpenAI.")
-        return None, False
-    if not api_key.startswith("sk-"):
-        print("❌ Invalid OpenAI API key format.")
-        return None, False
-    try:
-        client = OpenAI(api_key=api_key)
-        # Validate by listing models
-        client.models.list()
-        return client, True
-    except Exception as e:
-        print(f"❌ OpenAI client initialization failed: {e}")
-        return None, False
+    key = waveassist.fetch_data("open_router_key")
+    if not key:
+        print("⚠️ No OpenRouter API key found.")
+        return None
+    if not key.startswith("sk-"):
+        print("❌ Invalid OpenRouter API key format.")
+        return None
+    # point at OpenRouter’s OpenAI‐compatible endpoint
+    client = OpenAI(
+        api_key=key,
+        base_url="https://openrouter.ai/api/v1"
+    )
+    return client
 
-
-def _init_anthropic_client():
-    """
-    Initialize and validate Anthropic client.
-    Returns (client_instance or None, availability_flag).
-    """
-    api_key = waveassist.fetch_data("anthropic_key")
-    if not api_key:
-        print("⚠️ No API key found for Anthropic.")
-        return None, False
-    if not api_key.startswith("sk-"):
-        print("❌ Invalid Anthropic API key format.")
-        return None, False
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        # Validate by listing available models
-        client.get_available_models()
-        return client, True
-    except Exception as e:
-        print(f"❌ Anthropic client initialization failed: {e}")
-        return None, False
-
-
-# Set up clients
-openai_client, openai_avail = _init_openai_client()
-if openai_avail:
-    print("✅ OpenAI client ready.")
-
-anthropic_client, anthropic_avail = _init_anthropic_client()
-if anthropic_avail:
-    print("✅ Anthropic client ready.")
-
-
-if not (openai_avail or anthropic_avail):
-    raise RuntimeError("❌ Neither OpenAI nor Anthropic key is available – nothing to do.")
+# Create the client
+openai_client = _init_openrouter_client()
+if not openai_client:
+    raise RuntimeError("❌ OpenRouter client initialization failed.")
+print("✅ OpenRouter client ready.")
 
 def format_changed_files(files, max_chars=25000):
     """Format file diffs into blocks, capping total length at max_chars."""
@@ -112,7 +64,7 @@ def format_changed_files(files, max_chars=25000):
     return "\n\n".join(included)
 
 def get_prompt(review_pr):
-  return f"""
+    return f"""
 You are an experienced senior software engineer reviewing a GitHub pull request. Below is the PR metadata and code diffs.
 
   ✍️ Your task is to generate a **structured, clear, concise, and friendly** PR review comment. Use the following format:
@@ -136,7 +88,7 @@ You are an experienced senior software engineer reviewing a GitHub pull request.
   ✅ **Tone**: Friendly and to the point. Use emojis where appropriate.
   ⛔ **Avoid**: Repeating raw code or including anything outside the review comment itself.  
     **Note**: Some files may be truncated here for tokens optimisation but are complete in the actual PR.
-    **Important**: The output will be posted directly as a GitHub PR comment. Dont include anything else.
+    **Important**: The output will be posted directly as a GitHub PR comment. Don’t include anything else.
   ---
 
   ###  PR Metadata:
@@ -149,52 +101,36 @@ You are an experienced senior software engineer reviewing a GitHub pull request.
   {format_changed_files(review_pr['files'], int(review_pr["max_input_tokens"] * TOKEN_MULTIPLIER))}
   """
 
-
-def call_openai(prompt, model_key):
-    resp = openai_client.responses.create(
+def call_model(prompt, model_key, max_output_tokens=512):
+    """
+    Send the prompt to OpenRouter via the OpenAI SDK.
+    """
+    resp = openai_client.chat.completions.create(
         model=model_key,
-        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
-        text={"format": {"type": "text"}},
-        reasoning={}, tools=[],
-        temperature=0.5, max_output_tokens=512, top_p=1, store=True,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+        max_tokens=max_output_tokens,
+        top_p=1.0,
     )
-    return resp.output[0].content[0].text
-
-
-def call_anthropic(prompt, model_key):
-    msg = anthropic_client.messages.create(
-        model=model_key,
-        max_tokens=512, temperature=0.5,
-        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-    )
-    return msg.content[0].text
-
+    return resp.choices[0].message.content
 
 def add_model_data(pr):
     """
-    Determine which client to use:
-      - If Claude requested but Anthropic unavailable, fall back to OpenAI
-      - If OpenAI requested but unavailable, fall back to Anthropic
+    Choose an OpenRouter model based on the user’s request:
+      - Claude if requested (via OpenRouter’s Anthropic integration)
+      - Otherwise an OpenAI model
     """
-    req = pr.get("model", "gpt-4o-mini")
-    use = None
+    req = pr.get("model", "").lower()
+    if req.startswith("claude"):
+        # OpenRouter’s name for Claude 3.5
+        pr["model_key"] = "anthropic/claude-3.5-sonnet"
+        pr["max_input_tokens"] = 10000
+    else:
+        # fallback to WaveAssist’s default OpenAI model
+        pr["model_key"] = "gpt-4o-mini"
+        pr["max_input_tokens"] = 20000
 
-    if req.lower().startswith("claude") and anthropic_avail:
-        use = ("anthropic", "claude-3-5-haiku-20241022", 10000)
-    elif req.lower().startswith("claude") and not anthropic_avail:
-        print(f"⚠️ Claude requested but unavailable for PR #{pr['pr_number']} – using OpenAI.")
-    if (not req.lower().startswith("claude") or use is None) and openai_avail:
-        use = ("openai", "gpt-4o-mini", 20000)
-    elif use is None:
-        print(f"⚠️ OpenAI unavailable – using Anthropic for PR #{pr['pr_number']}.")
-
-    pr.update({
-        "client": use[0],
-        "model_key": use[1],
-        "max_input_tokens": use[2]
-    })
     return pr
-
 
 # Main loop
 prs = waveassist.fetch_data("pull_requests")
@@ -202,10 +138,7 @@ for pr in prs:
     try:
         pr = add_model_data(pr)
         prompt = get_prompt(pr)
-        if pr["client"] == "anthropic":
-            pr["comment"] = call_anthropic(prompt, pr["model_key"])
-        else:
-            pr["comment"] = call_openai(prompt, pr["model_key"])
+        pr["comment"] = call_model(prompt, pr["model_key"])
         pr.update(comment_generated=True, comment_posted=False)
         print(f"✅ PR #{pr['pr_number']} reviewed.")
     except Exception as e:

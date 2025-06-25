@@ -3,22 +3,21 @@ description: AI-powered GitHub bot that monitors pull requests, generates struct
 
 requirements:
   - openai==1.77.0
-  - anthropic==0.50.0
 
 nodes:
   - key: initialize_repositories
     name: InitializeRepositories
     file_name: initialize_repositories.py
     starting_node: true
-
-  - key: fetch_pull_requests
-    name: FetchPRs
-    file_name: fetch_pull_requests.py
     schedule:
       interval:
         every: 2
         period: minutes
-    starting_node: true
+
+  - key: fetch_pull_requests
+    name: FetchPRs
+    file_name: fetch_pull_requests.py
+    run_after: [initialize_repositories]
 
   - key: generate_review
     name: GenerateReview
@@ -33,7 +32,5 @@ nodes:
 variables:
     - name: github_ghp_token
       value: your-github-token
-    - name: openai_key
-      value: your-openai-key
-    - name: anthropic_key
-      value: your-anthropic-key
+
+
