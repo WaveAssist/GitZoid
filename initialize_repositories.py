@@ -53,8 +53,15 @@ def fetch_repositories_with_access(token: str):
 
 try:
     token = waveassist.fetch_data("github_ghp_token")
-    accessible_repos = fetch_repositories_with_access(token)
-    waveassist.store_data("repositories", accessible_repos)
-    print(f"✅ Stored {len(accessible_repos)} accessible repositories to WaveAssist.")
+    should_fetch_repositories = str(waveassist.fetch_data("should_fetch_repositories") or "1").strip()
+    if should_fetch_repositories == '1':
+        print("🔄 Fetching accessible repositories from GitHub...")
+        accessible_repos = fetch_repositories_with_access(token)
+        if len(accessible_repos) == 0:
+            print("⚠️ No accessible repositories found with both pull and push permissions.")
+        else:
+            waveassist.store_data("repositories", accessible_repos)
+            waveassist.store_data("should_fetch_repositories", '0')
+            print(f"✅ Stored {len(accessible_repos)} accessible repositories to WaveAssist.")
 except Exception as e:
     print(f"❌ Error: {e}")
