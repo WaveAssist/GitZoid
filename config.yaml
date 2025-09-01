@@ -30,7 +30,9 @@ nodes:
     run_after: [generate_review]
 
 variables:
-    - name: github_ghp_token
-      value: your-github-token
-
-
+  - name: github_ghp_token
+    value: your-github-token
+    type: "text"
+    is_optional: false
+    helper_message: "Enter your GitHub Personal Access Token"
+    key: github_ghp_toke
