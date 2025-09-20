@@ -31,7 +31,9 @@ nodes:
 
 variables:
   - type: github
-    label: Connect GitHub
-    required: true
-    scopes: ["repo", "user:email", "admin:repo_hook"]
-    required_resources: ['repos']
+    name: github
+    key: github
+    is_optional: false
+    scopes: ["repo"]
+    required_resources: ["repos"]
+    helper_message: "Connect your GitHub account to the app"
