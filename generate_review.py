@@ -1,35 +1,44 @@
 from openai import OpenAI
 import waveassist
-
+import json
+import re
 # Constants
 TOKEN_MULTIPLIER = 2.5
 
-# Initialize WaveAssist
 waveassist.init()
 
-def _init_openrouter_client():
-    """
-    Initialize and validate the OpenRouter client via the OpenAI SDK.
-    """
-    key = waveassist.fetch_data("open_router_key")
-    if not key:
-        print("⚠️ No OpenRouter API key found.")
-        return None
-    if not key.startswith("sk-"):
-        print("❌ Invalid OpenRouter API key format.")
-        return None
-    # point at OpenRouter’s OpenAI‐compatible endpoint
-    client = OpenAI(
-        api_key=key,
-        base_url="https://openrouter.ai/api/v1"
-    )
-    return client
+print("Processing AI Review Generation node")
 
-# Create the client
-openai_client = _init_openrouter_client()
-if not openai_client:
-    raise RuntimeError("❌ OpenRouter client initialization failed.")
-print("✅ OpenRouter client ready.")
+# initialize OpenRouter client
+openai_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=waveassist.fetch_data("open_router_key"),
+)
+
+
+def extract_json(content):
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+    # try extracting from ```json ... ```
+    start = content.find("```json")
+    if start != -1:
+        end = content.find("```", start + 6)
+        if end != -1:
+            try:
+                return json.loads(content[start + 7 : end].strip())
+            except json.JSONDecodeError:
+                pass
+    # fallback regex
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return None
+
 
 def format_changed_files(files, max_chars=25000):
     """Format file diffs into blocks, capping total length at max_chars."""
@@ -38,11 +47,21 @@ def format_changed_files(files, max_chars=25000):
     except (TypeError, ValueError):
         max_chars = 25000
 
+    if not isinstance(files, (list, tuple)) or not files:
+        return "No files changed."
+
     blocks, total = [], 0
     for idx, f in enumerate(files, 1):
-        block = f"{idx}. Filename: `{f['filename']}`\n```\n{f['patch']}\n```"
-        length = len(block)
-        blocks.append((length, block))
+        try:
+            if "patch" not in f or f["patch"] is None:
+                block = f"{idx}. Filename: `{f['filename']}`\n*No diff available for this file.*"
+            else:
+                block = f"{idx}. Filename: `{f['filename']}`\n```\n{f['patch']}\n```"
+
+            length = len(block)
+            blocks.append((length, block))
+        except:
+            pass
 
     blocks.sort(key=lambda x: x[0])
     included, remaining = [], []
@@ -55,90 +74,88 @@ def format_changed_files(files, max_chars=25000):
             remaining.append((length, block))
 
     if remaining:
-        budget = (max_chars - total) + int(0.1 * max_chars)
-        per_block = budget // len(remaining)
-        for _, block in remaining:
-            truncated = block.split("```", 1)[1][: per_block - 100]
-            included.append(f"...\n```{truncated}\n... (truncated)\n```")
+        try:
+            budget = (max_chars - total) + int(0.1 * max_chars)
+            per_block = budget // len(remaining)
+            for _, block in remaining:
+                truncated = block.split("```", 1)[1][:per_block]
+                included.append(
+                    f"...\n```{truncated}\n... (file truncated for tokens optimisation, post your analysis based on available context.)\n```"
+                )
+        except:
+            pass
 
     return "\n\n".join(included)
 
-def get_prompt(review_pr):
+
+def get_prompt(review_pr, max_input_tokens=20000):
+    formatted_files = format_changed_files(
+        review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
+    )
     return f"""
-You are an experienced senior software engineer reviewing a GitHub pull request. Below is the PR metadata and code diffs.
+You are an experienced senior software engineer reviewing a GitHub pull request. Provided is the PR metadata and code diffs.
+Your task is to generate a structured, clear, concise, and friendly PR review comment in JSON format.
+For each section, provide the content as an array of strings representing the numbered list items. If a section has no items (e.g., optional Suggestions & Comments), use an empty array [].
+Where:
+- `summary`: Briefly explain in points what this PR does and the nature of the changes.  
+- `potential_issues`: Identify possible bugs, breaking changes, missing edge cases, or best practice violations in point form.  
+- `potential_optimizations`: Suggest improvements to performance, readability, or simplicity in point form.  
+- `suggestions`: Optional: Praise good practices, suggest tests, or style improvements in point form.  
 
-  ✍️ Your task is to generate a **structured, clear, concise, and friendly** PR review comment. Use the following format:
+Guidelines:
+- Tone: Friendly and to the point.
+- Avoid: Repeating raw code or repeating the same thing in different points.  
+- Note: Some files may be truncated here for tokens optimisation. That's ok. Post your analysis based on available context.
+    
+---
+PR Metadata:
+  - PR Number: {review_pr.get("pr_number")}
+  - Title: {review_pr.get("title")}
+  - Description: {review_pr.get("body")}
+---
+Changed Files and Diffs:
+{formatted_files}
+---
 
-  ---
+Now, output strictly in the following JSON format (no additional text outside the JSON):
+{{
+    "summary": ["First item...", "Second item..."],
+    "potential_issues": ["First item...", "Second item..."],
+    "potential_optimizations": ["First item...", "Second item..."],
+    "suggestions": ["First item...", "Second item..."]
+}}
 
-  ### 📝 Summary
-   Briefly explain what this PR does and the nature of the changes. Use a **numbered list**.
+Return ONLY the JSON object. No markdown, commentary, or extra text—strict JSON for parsing.
+Return JSON now:
+    """
 
-  ### ⚠️ Potential Issues
-   Identify possible bugs, breaking changes, missing edge cases, or best practice violations. Use a **numbered list**.
 
-  ### 🚀 Potential Optimizations
-   Suggest improvements to performance, readability, or simplicity. Use a **numbered list**.
-
-  ### 💡 Suggestions & Comments
-   Optional: Praise good practices, suggest tests, or style improvements. Use a **numbered list**.
-
-  ---
-
-  ✅ **Tone**: Friendly and to the point. Use emojis where appropriate.
-  ⛔ **Avoid**: Repeating raw code or including anything outside the review comment itself.  
-    **Note**: Some files may be truncated here for tokens optimisation but are complete in the actual PR.
-    **Important**: The output will be posted directly as a GitHub PR comment. Don’t include anything else.
-  ---
-
-  ###  PR Metadata:
-  - PR Number: {review_pr["pr_number"]}
-  - Title: {review_pr["title"]}
-  - Description: {review_pr["body"]}
-  - Target Branch: {review_pr["target_branch"]}
-
-  ### Changed Files and Diffs:
-  {format_changed_files(review_pr['files'], int(review_pr["max_input_tokens"] * TOKEN_MULTIPLIER))}
-  """
-
-def call_model(prompt, model_key, max_output_tokens=512):
+def execute_prompt(prompt, model_key, max_output_tokens=1024):
     """
     Send the prompt to OpenRouter via the OpenAI SDK.
     """
-    resp = openai_client.chat.completions.create(
-        model=model_key,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=max_output_tokens,
-        top_p=1.0,
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = openai_client.chat.completions.create(
+            model=model_key,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=max_output_tokens,
+        )
+        return extract_json(resp.choices[0].message.content)
+    except Exception as e:
+        print(f"Error during model call: {e}")
+        return ""
 
-def add_model_data(pr):
-    """
-    Choose an OpenRouter model based on the user’s request:
-      - Claude if requested (via OpenRouter’s Anthropic integration)
-      - Otherwise an OpenAI model
-    """
-    req = pr.get("model", "").lower()
-    if req.startswith("claude"):
-        # OpenRouter’s name for Claude 3.5
-        pr["model_key"] = "anthropic/claude-3.5-sonnet"
-        pr["max_input_tokens"] = 10000
-    else:
-        # fallback to WaveAssist’s default OpenAI model
-        pr["model_key"] = "gpt-4o-mini"
-        pr["max_input_tokens"] = 20000
 
-    return pr
 
-# Main loop
+# Main code
+model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
 prs = waveassist.fetch_data("pull_requests")
 for pr in prs:
     try:
-        pr = add_model_data(pr)
         prompt = get_prompt(pr)
-        pr["comment"] = call_model(prompt, pr["model_key"])
+        review_dict = execute_prompt(prompt, model_name)
+        pr["review_dict"] = review_dict
         pr.update(comment_generated=True, comment_posted=False)
         print(f"✅ PR #{pr['pr_number']} reviewed.")
     except Exception as e:
@@ -146,4 +163,4 @@ for pr in prs:
         pr.update(comment="", comment_generated=False, comment_posted=False)
 
 waveassist.store_data("pull_requests", prs)
-print("✅ All done.")
+print("All PR reviews processed and stored.")

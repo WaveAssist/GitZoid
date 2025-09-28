@@ -2,32 +2,29 @@ name: Gitzoid
 description: AI-powered GitHub bot that monitors pull requests, generates structured reviews, and posts them back.
 
 requirements:
-  - openai==1.77.0
+  - openai
 
 nodes:
-  - key: initialize_repositories
-    name: InitializeRepositories
-    file_name: initialize_repositories.py
+  - key: fetch_pull_requests
+    name: FetchPRs
+    file_name: fetch_pull_requests.py
     starting_node: true
     schedule:
       interval:
         every: 2
         period: minutes
 
-  - key: fetch_pull_requests
-    name: FetchPRs
-    file_name: fetch_pull_requests.py
-    run_after: [initialize_repositories]
-
   - key: generate_review
     name: GenerateReview
     file_name: generate_review.py
-    run_after: [fetch_pull_requests]
+    run_after:
+      - fetch_pull_requests
 
   - key: post_comment
     name: PostComment
     file_name: post_comment.py
-    run_after: [generate_review]
+    run_after:
+      - generate_review
 
 variables:
   - type: github
