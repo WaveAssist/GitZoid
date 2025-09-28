@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid_logo_dark.png" alt="GitZoid Logo" width="200" />
+  <img src="https://waveassist.io/images/templates/gitzoid/GitzoidLogoDark.png" alt="GitZoid Logo" width="200" />
 </p>
 
 <h1 align="center">GitZoid: Open-Source AI-Powered GitHub PR Reviewer</h1>
@@ -26,7 +26,7 @@ GitZoid is an **open-source** GitHub bot that automates pull-request reviews usi
 Try the **hosted version** at [https://gitzoid.com](https://gitzoid.com) — no setup required.
 
 <p align="center">
-  <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/gitzoid-og-home.png" alt="GitZoid UI Preview" width="100%" />
+  <img src="https://waveassist.io/images/templates/gitzoid/pr_review.png" alt="GitZoid UI Preview" width="100%" />
 </p>
 
 ---
@@ -37,7 +37,7 @@ Try the **hosted version** at [https://gitzoid.com](https://gitzoid.com) — no 
 
 <p>
   <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
-    <img src="https://waveassistapps.s3.us-east-1.amazonaws.com/public/Button.png" alt="Deploy on WaveAssist" width="230" />
+    <img src="https://waveassist.io/images/templates/Button.png" alt="Deploy on WaveAssist" width="230" />
   </a>
 </p>
 
