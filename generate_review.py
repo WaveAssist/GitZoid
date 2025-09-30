@@ -18,7 +18,7 @@ openai_client = OpenAI(
 )
 
 
-def check_credis_and_email(min_credits_required=0.1):
+def check_credis_and_email(min_credits_required=0.1, max_attempts=1):
     credits_data = waveassist.fetch_openrouter_credits()
     credits_remaining = float(credits_data.get("limit_remaining", 0))
 
@@ -76,7 +76,7 @@ def check_credis_and_email(min_credits_required=0.1):
         )
         # Only send email if we haven't sent it twice already
         failure_count = int(waveassist.fetch_data("failure_count") or 0)
-        if failure_count < 2:
+        if failure_count < max_attempts:
             waveassist.send_email(
                 subject=failure_subject, html_content=failure_html_body
             )
