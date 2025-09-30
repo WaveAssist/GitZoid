@@ -89,7 +89,7 @@ def check_credis_and_email(min_credits_required=0.1, max_attempts=1):
         display_output = {
             "html_content": failure_html_body,
         }
-        waveassist.store_data("display_output", display_output)
+        waveassist.store_data("display_output", display_output, run_based=True)
 
         return False
     else:
