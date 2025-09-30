@@ -68,6 +68,7 @@ def update_last_checked(repos: list, repo_path: str, timestamp: str):
             existing = repo.get("last_checked")
             if existing is None or timestamp > existing:
                 repo["last_checked"] = timestamp
+                repo["extra"] = {}
             break
 
 
@@ -82,7 +83,7 @@ for pr in prs_to_review:
 if should_process:
     github_token = waveassist.fetch_data("github_access_token")
     repositories = waveassist.fetch_data("github_selected_resources")
-    display_output_content = ""
+    display_output_content = "<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; line-height: 1.5;\">"
     if not github_token:
         raise RuntimeError("❌ Missing `github_access_token`; cannot post PR comments.")
 
@@ -109,15 +110,12 @@ if should_process:
                 pr["id"],
                 pr["pr_created_at"],
             )
-            display_output_content += (
-                f"✅ Comment posted to {pr['id']} PR #{pr['pr_number']}\n"
-            )
+            display_output_content += f'<div style="margin-bottom: 8px; color: #28a745;">✅ Comment posted to <strong>{pr["id"]}</strong> PR #{pr["pr_number"]}</div>'
 
     # Persist updates
-    display_output_content += "✅ Repositories and PRs updated successfully."
-
+    display_output_content += '<div style="margin-top: 12px; color: #28a745;">✅ Repositories and PRs updated successfully.</div></div>'
     waveassist.store_data("github_selected_resources", repositories)
-    waveassist.store_data("pull_requests", prs_to_review)
+    waveassist.store_data("pull_requests", [])
     waveassist.store_data(
         "display_output", {"html_content": display_output_content}, run_based=True
     )

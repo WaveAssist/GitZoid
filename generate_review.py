@@ -154,6 +154,8 @@ if prs:
     model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
     for pr in prs:
         try:
+            if pr.get("comment_generated", False):
+                continue
             prompt = get_prompt(pr)
             review_dict = execute_prompt(prompt, model_name)
 
