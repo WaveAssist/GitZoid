@@ -2,6 +2,7 @@ from openai import OpenAI
 import waveassist
 import json
 import re
+from datetime import datetime
 
 # Constants
 TOKEN_MULTIPLIER = 2.5
@@ -15,6 +16,87 @@ openai_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=waveassist.fetch_data("open_router_key"),
 )
+
+
+def check_credis_and_email(min_credits_required=0.1):
+    credits_data = waveassist.fetch_openrouter_credits()
+    credits_remaining = float(credits_data.get("limit_remaining", 0))
+
+    # Simple failure email HTML
+    failure_html_body = f"""
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            .container {{ max-width: 500px; margin: 0 auto; }}
+            .header {{ background-color: #f5f5f5; padding: 15px; border-radius: 5px; }}
+            .content {{ padding: 15px; border: 1px solid #ddd; border-radius: 5px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>GitZoid: Credit Limit Reached</h2>
+                <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+            </div>
+            
+            <div class="content">
+                <h3>PR Review Unavailable</h3>
+                <p>We were unable to generate PR reviews because your API credits have been fully utilized.</p>
+                
+                <p><strong>Required credits:</strong> {min_credits_required}</p>
+                <p><strong>Credits remaining:</strong> {credits_remaining}</p>
+                
+                <p><strong>To continue using GitZoid:</strong></p>
+                <ul>
+                    <li>Check your credit balance</li>
+                    <li>Purchase additional credits if needed</li>
+                    <li>Review your usage patterns</li>
+                </ul>
+                
+                <p><a href="https://app.waveassist.io">View Dashboard & Check Credits</a></p>
+                
+                <p><strong>Need help?</strong> Contact support for credit-related questions.</p>
+            </div>
+            
+            <div style="font-size: 12px; color: #888; margin-top: 20px; text-align: center;">
+                © {datetime.now().year} GitZoid | Powered by WaveAssist
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    failure_subject = "GitZoid: PR Review Unavailable - Credit Limit Reached"
+
+    # Check if credits are sufficient
+    if credits_remaining < min_credits_required:
+        print(
+            f"Credits needed: {min_credits_required}, Credits remaining: {credits_remaining}"
+        )
+        # Only send email if we haven't sent it twice already
+        failure_count = int(waveassist.fetch_data("failure_count") or 0)
+        if failure_count < 2:
+            waveassist.send_email(
+                subject=failure_subject, html_content=failure_html_body
+            )
+            print("Failure notification email sent successfully")
+
+        waveassist.store_data("credits_available", "0")
+        waveassist.store_data("failure_count", str(failure_count + 1))
+
+        # Store display output for the UI
+        display_output = {
+            "html_content": failure_html_body,
+        }
+        waveassist.store_data("display_output", display_output)
+
+        return False
+    else:
+        waveassist.store_data("credits_available", "1")
+        waveassist.store_data("failure_count", "0")
+        print("Credits available, proceeding with PR review generation")
+        return True
 
 
 def extract_json(content):
@@ -146,6 +228,7 @@ def execute_prompt(prompt, model_key, max_output_tokens=1024):
         return extract_json(resp.choices[0].message.content)
     except Exception as e:
         print(f"Error during model call: {e}")
+        check_credis_and_email()
         return {}
 
 
