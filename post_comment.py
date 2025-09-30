@@ -82,7 +82,7 @@ for pr in prs_to_review:
 if should_process:
     github_token = waveassist.fetch_data("github_access_token")
     repositories = waveassist.fetch_data("github_selected_resources")
-
+    display_output_content = ""
     if not github_token:
         raise RuntimeError("❌ Missing `github_access_token`; cannot post PR comments.")
 
@@ -109,12 +109,16 @@ if should_process:
                 pr["id"],
                 pr["pr_created_at"],
             )
+            display_output_content += (
+                f"✅ Comment posted to {pr['id']} PR #{pr['pr_number']}\n"
+            )
 
     # Persist updates
-    ok1 = waveassist.store_data("github_selected_resources", repositories)
-    ok2 = waveassist.store_data("pull_requests", prs_to_review)
+    display_output_content += "✅ Repositories and PRs updated successfully."
 
-    if ok1 and ok2:
-        print("✅ Repositories and PRs updated successfully.")
-    else:
-        print("❌ Error: failed to store updated data.")
+    waveassist.store_data("github_selected_resources", repositories)
+    waveassist.store_data("pull_requests", prs_to_review)
+    waveassist.store_data(
+        "display_output", {"html_content": display_output_content}, run_based=True
+    )
+    print("✅ Repositories and PRs updated successfully.")

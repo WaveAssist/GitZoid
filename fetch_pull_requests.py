@@ -1,17 +1,3 @@
-"""
-WaveAssist Node: Fetch Open Pull Requests for Accessible Repositories
-
-This node loops over a list of accessible repositories stored in WaveAssist (under the key `github_selected_resources`),
-fetches open pull requests created after the last checked time, and stores them along with file diffs.
-
-Expected input keys:
-- `repositories`: list of repositories with `id` as path, `name` as repo_name, etc.
-- `github_access_token`: GitHub oauth access token
-
-Output key:
-- `pull_requests`: structured list of PRs with metadata and changed files
-"""
-
 from datetime import datetime, timezone
 import requests
 import waveassist
@@ -22,7 +8,6 @@ waveassist.init()
 def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
     all_prs = []
     repo_path = repo_metadata["id"]
-    # Parse last_checked timestamp
     last_checked_str = repo_metadata.get("last_checked")
     if last_checked_str:
         try:
@@ -111,5 +96,6 @@ for repo in repositories:
     prs = fetch_open_pull_requests(repo, access_token)
     all_pull_requests.extend(prs)
 
-waveassist.store_data("pull_requests", all_pull_requests)
-print(f"✅ Fetched and stored {len(all_pull_requests)} pull requests.")
+if all_pull_requests:
+    waveassist.store_data("pull_requests", all_pull_requests)
+    print(f"✅ Fetched and stored {len(all_pull_requests)} pull requests.")

@@ -2,6 +2,7 @@ from openai import OpenAI
 import waveassist
 import json
 import re
+
 # Constants
 TOKEN_MULTIPLIER = 2.5
 
@@ -144,23 +145,28 @@ def execute_prompt(prompt, model_key, max_output_tokens=1024):
         return extract_json(resp.choices[0].message.content)
     except Exception as e:
         print(f"Error during model call: {e}")
-        return ""
-
+        return {}
 
 
 # Main code
-model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
 prs = waveassist.fetch_data("pull_requests")
-for pr in prs:
-    try:
-        prompt = get_prompt(pr)
-        review_dict = execute_prompt(prompt, model_name)
-        pr["review_dict"] = review_dict
-        pr.update(comment_generated=True, comment_posted=False)
-        print(f"✅ PR #{pr['pr_number']} reviewed.")
-    except Exception as e:
-        print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
-        pr.update(comment="", comment_generated=False, comment_posted=False)
+if prs:
+    model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
+    for pr in prs:
+        try:
+            prompt = get_prompt(pr)
+            review_dict = execute_prompt(prompt, model_name)
 
-waveassist.store_data("pull_requests", prs)
-print("All PR reviews processed and stored.")
+            if not review_dict:
+                raise Exception("❌ Review not generated.")
+
+            pr.update(
+                review_dict=review_dict, comment_generated=True, comment_posted=False
+            )
+            print(f"✅ PR #{pr['pr_number']} reviewed.")
+        except Exception as e:
+            print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
+            pr.update(review_dict={}, comment_generated=False, comment_posted=False)
+
+    waveassist.store_data("pull_requests", prs)
+    print("All PR reviews processed and stored.")
