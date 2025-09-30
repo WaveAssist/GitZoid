@@ -103,10 +103,11 @@ Where:
 - `potential_optimizations`: Suggest improvements to performance, readability, or simplicity in point form.  
 - `suggestions`: Optional: Praise good practices, suggest tests, or style improvements in point form.  
 
+Note: Some files may be truncated here for tokens optimisation. That's ok. Post your analysis based on available context.
+
 Guidelines:
-- Tone: Friendly and to the point.
-- Avoid: Repeating raw code or repeating the same thing in different points.  
-- Note: Some files may be truncated here for tokens optimisation. That's ok. Post your analysis based on available context.
+- Tone: Friendly, short and to the point.
+- Do not repeat raw code or repeat the same thing in different points.  
     
 ---
 PR Metadata:
