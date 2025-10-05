@@ -189,6 +189,7 @@ Note: Some files may be truncated here for tokens optimisation. That's ok. Post 
 
 Guidelines:
 - Tone: Friendly, short and to the point.
+- Limit to 2-3 points per section, unless more are clearly needed.
 - Do not repeat raw code or repeat the same thing in different points.  
     
 ---
