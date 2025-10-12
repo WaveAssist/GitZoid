@@ -36,11 +36,13 @@ variables:
     helper_message: "Connect your GitHub account to the app"
   - name: model_name
     key: model_name
-    value: "x-ai/grok-code-fast-1"
+    value: "anthropic/claude-sonnet-4.5"
     type: "string"
     is_optional: true
     helper_message: "Select model for review generation"
     options:
+      - name: Claude Sonnet 4.5
+        key: anthropic/claude-sonnet-4.5
       - name: Grok Code Fast 1
         key: x-ai/grok-code-fast-1
       - name: Claude Sonnet 4
@@ -51,8 +53,7 @@ variables:
         key: deepseek/deepseek-chat-v3.1
       - name: GPT-5 Mini
         key: openai/gpt-5-mini
-      - name: Claude Sonnet 4.5
-        key: anthropic/claude-sonnet-4.5
+
   - name: additional_context
     key: additional_context
     value: ""
