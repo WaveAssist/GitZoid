@@ -250,7 +250,7 @@ def execute_prompt(prompt, model_key, max_output_tokens=1024):
 # Main code
 prs = waveassist.fetch_data("pull_requests")
 if prs:
-    model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
+    model_name = waveassist.fetch_data("model_name") or "anthropic/claude-sonnet-4.5"
     additional_context = waveassist.fetch_data("additional_context")
     for pr in prs:
         try:
