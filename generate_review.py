@@ -171,10 +171,23 @@ def format_changed_files(files, max_chars=25000):
     return "\n\n".join(included)
 
 
-def get_prompt(review_pr, max_input_tokens=20000):
+def get_prompt(review_pr, max_input_tokens=20000, additional_context=None):
     formatted_files = format_changed_files(
         review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
     )
+
+    # Build additional context section if provided
+    context_section = ""
+    if additional_context and additional_context.strip():
+        context_section = f"""
+---
+Additional context provided to help you with the review, just for reference, not necessary to use it, or only use relevant parts if needed:
+##CONTEXT START##
+{additional_context.strip()}
+##CONTEXT END##
+---
+"""
+
     return f"""
 You are an experienced senior software engineer reviewing a GitHub pull request. Provided is the PR metadata and code diffs.
 Your task is to generate a structured, clear, concise, and friendly PR review comment in JSON format.
@@ -192,6 +205,9 @@ Guidelines:
 - Limit to 2-3 points per section, unless more are clearly needed.
 - Do not repeat raw code or repeat the same thing in different points.  
     
+{context_section}
+
+*PRIMARY CONTENT TO REVIEW:*
 ---
 PR Metadata:
   - PR Number: {review_pr.get("pr_number")}
@@ -200,8 +216,6 @@ PR Metadata:
 ---
 Changed Files and Diffs:
 {formatted_files}
----
-
 Now, output strictly in the following JSON format (no additional text outside the JSON):
 {{
     "summary": ["First item...", "Second item..."],
@@ -237,11 +251,12 @@ def execute_prompt(prompt, model_key, max_output_tokens=1024):
 prs = waveassist.fetch_data("pull_requests")
 if prs:
     model_name = waveassist.fetch_data("model_name") or "x-ai/grok-code-fast-1"
+    additional_context = waveassist.fetch_data("additional_context")
     for pr in prs:
         try:
             if pr.get("comment_generated", False):
                 continue
-            prompt = get_prompt(pr)
+            prompt = get_prompt(pr, additional_context=additional_context)
             review_dict = execute_prompt(prompt, model_name)
 
             if not review_dict:
