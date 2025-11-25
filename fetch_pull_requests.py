@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 import requests
 import waveassist
-
+FIRST_RUN_LIMIT = 2
+RUN_LIMIT = 5
 waveassist.init()
 
 
@@ -26,7 +27,7 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
     }
 
     # Calculate limit before API call
-    limit = 2 if first_run else 5
+    limit = FIRST_RUN_LIMIT if first_run else RUN_LIMIT
 
     # Step 1: Fetch open PRs
     prs_url = f"https://api.github.com/repos/{repo_path}/pulls"
