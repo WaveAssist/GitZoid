@@ -50,6 +50,11 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
 
     for pr in prs:
         try:
+            author = pr.get("user") or {}
+            login = (author.get("login") or "").lower()
+            if author.get("type") == "Bot" or login.endswith("[bot]"):
+                continue
+
             pr_created_at = datetime.fromisoformat(
                 pr["created_at"].replace("Z", "+00:00")
             )
