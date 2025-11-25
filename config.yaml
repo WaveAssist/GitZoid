@@ -38,11 +38,13 @@ variables:
     helper_message: "Connect your GitHub account to the app"
   - name: model_name
     key: model_name
-    value: "anthropic/claude-sonnet-4.5"
+    value: "anthropic/claude-haiku-4.5"
     type: "string"
     is_optional: true
     helper_message: "Select model for review generation"
     options:
+      - name: Claude Haiku 4.5
+        key: anthropic/claude-haiku-4.5
       - name: Claude Sonnet 4.5
         key: anthropic/claude-sonnet-4.5
       - name: Grok Code Fast 1
