@@ -33,7 +33,7 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
     prs_url = f"https://api.github.com/repos/{repo_path}/pulls"
     params = {
         "state": "open",
-        "sort": "updated",
+        "sort": "created",
         "direction": "desc",
         "per_page": limit,
     }
@@ -53,10 +53,7 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
             pr_created_at = datetime.fromisoformat(
                 pr["created_at"].replace("Z", "+00:00")
             )
-            pr_updated_at = datetime.fromisoformat(
-                pr["updated_at"].replace("Z", "+00:00")
-            )
-            if pr_updated_at <= last_checked:
+            if pr_created_at <= last_checked:
                 continue
             pr_number = pr["number"]
             # Step 3: Fetch changed files
@@ -87,7 +84,6 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
                 "title": pr.get("title"),
                 "body": pr.get("body"),
                 "pr_created_at": pr_created_at.isoformat(),
-                "pr_updated_at": pr_updated_at.isoformat(),
                 "files": processed_files,
             }
 
@@ -102,7 +98,7 @@ def fetch_open_pull_requests(repo_metadata: dict, access_token: str):
         except Exception as e:
             print(f"⚠️  Skipped PR due to error: {e}")
 
-    all_prs.sort(key=lambda x: x["pr_updated_at"], reverse=True)
+    all_prs.sort(key=lambda x: x["pr_created_at"], reverse=True)
     return all_prs
 
 
