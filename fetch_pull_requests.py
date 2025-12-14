@@ -3,7 +3,16 @@ import requests
 import waveassist
 FIRST_RUN_LIMIT = 2
 RUN_LIMIT = 5
+MINIMUM_CREDITS_REQUIRED = 0.1
 waveassist.init()
+
+success = waveassist.check_credits_and_notify(MINIMUM_CREDITS_REQUIRED, "GitZoid")
+if not success:
+    display_output = {
+        "html_content": "<p>Credits were not available, the run was skipped.</p>",
+    }
+    waveassist.store_data("display_output", display_output, run_based=True)
+    raise Exception("Credits were not available, the run was skipped.")
 
 
 def fetch_open_pull_requests(repo_metadata: dict, access_token: str):

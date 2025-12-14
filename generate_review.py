@@ -1,126 +1,14 @@
-from openai import OpenAI
 import waveassist
-import json
-import re
-from datetime import datetime
+from pydantic import BaseModel
 
 # Constants
 TOKEN_MULTIPLIER = 2.5
+max_tokens = 1024
+temperature = 0.5
 
-waveassist.init()
+waveassist.init(check_credits=True)
 
 print("Processing AI Review Generation node")
-
-# initialize OpenRouter client
-openai_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=waveassist.fetch_data("open_router_key"),
-)
-
-
-def check_credis_and_email(min_credits_required=0.1, max_attempts=1):
-    credits_data = waveassist.fetch_openrouter_credits()
-    credits_remaining = float(credits_data.get("limit_remaining", 0))
-
-    # Simple failure email HTML
-    failure_html_body = f"""
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; }}
-            .container {{ max-width: 500px; margin: 0 auto; }}
-            .header {{ background-color: #f5f5f5; padding: 15px; border-radius: 5px; }}
-            .content {{ padding: 15px; border: 1px solid #ddd; border-radius: 5px; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h2>GitZoid: Credit Limit Reached</h2>
-                <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-            </div>
-            
-            <div class="content">
-                <h3>PR Review Unavailable</h3>
-                <p>We were unable to generate PR reviews because your API credits have been fully utilized.</p>
-                
-                <p><strong>Required credits:</strong> {min_credits_required}</p>
-                <p><strong>Credits remaining:</strong> {credits_remaining}</p>
-                
-                <p><strong>To continue using GitZoid:</strong></p>
-                <ul>
-                    <li>Check your credit balance</li>
-                    <li>Purchase additional credits if needed</li>
-                    <li>Review your usage patterns</li>
-                </ul>
-                
-                <p><a href="https://app.waveassist.io">View Dashboard & Check Credits</a></p>
-                
-                <p><strong>Need help?</strong> Contact support for credit-related questions.</p>
-            </div>
-            
-            <div style="font-size: 12px; color: #888; margin-top: 20px; text-align: center;">
-                © {datetime.now().year} GitZoid | Powered by WaveAssist
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    failure_subject = "GitZoid: PR Review Unavailable - Credit Limit Reached"
-
-    # Check if credits are sufficient
-    if credits_remaining < min_credits_required:
-        print(
-            f"Credits needed: {min_credits_required}, Credits remaining: {credits_remaining}"
-        )
-        # Only send email if we haven't sent it twice already
-        failure_count = int(waveassist.fetch_data("failure_count") or 0)
-        if failure_count < max_attempts:
-            waveassist.send_email(
-                subject=failure_subject, html_content=failure_html_body
-            )
-            print("Failure notification email sent successfully")
-
-        waveassist.store_data("credits_available", "0")
-        waveassist.store_data("failure_count", str(failure_count + 1))
-
-        # Store display output for the UI
-        display_output = {
-            "html_content": failure_html_body,
-        }
-        waveassist.store_data("display_output", display_output, run_based=True)
-
-        return False
-    else:
-        waveassist.store_data("credits_available", "1")
-        waveassist.store_data("failure_count", "0")
-        print("Credits available, proceeding with PR review generation")
-        return True
-
-
-def extract_json(content):
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-    # try extracting from ```json ... ```
-    start = content.find("```json")
-    if start != -1:
-        end = content.find("```", start + 6)
-        if end != -1:
-            try:
-                return json.loads(content[start + 7 : end].strip())
-            except json.JSONDecodeError:
-                pass
-    # fallback regex
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 def format_changed_files(files, max_chars=25000):
@@ -171,6 +59,13 @@ def format_changed_files(files, max_chars=25000):
     return "\n\n".join(included)
 
 
+class PRReviewResult(BaseModel):
+    summary: list[str]
+    potential_issues: list[str]
+    potential_optimizations: list[str]
+    suggestions: list[str]
+
+
 def get_prompt(review_pr, max_input_tokens=20000, additional_context=None):
     formatted_files = format_changed_files(
         review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
@@ -190,7 +85,7 @@ Additional context provided to help you with the review, just for reference, not
 
     return f"""
 You are an experienced senior software engineer reviewing a GitHub pull request. Provided is the PR metadata and code diffs.
-Your task is to generate a structured, clear, concise, and friendly PR review comment in JSON format.
+Your task is to generate a structured, clear, concise, and friendly PR review comment.
 For each section, provide the content as an array of strings representing the numbered list items. If a section has no items (e.g., optional Suggestions & Comments), use an empty array [].
 Where:
 - `summary`: Briefly explain in points what this PR does and the nature of the changes.  
@@ -216,52 +111,34 @@ PR Metadata:
 ---
 Changed Files and Diffs:
 {formatted_files}
-Now, output strictly in the following JSON format (no additional text outside the JSON):
-{{
-    "summary": ["First item...", "Second item..."],
-    "potential_issues": ["First item...", "Second item..."],
-    "potential_optimizations": ["First item...", "Second item..."],
-    "suggestions": ["First item...", "Second item..."]
-}}
+---
 
-Return ONLY the JSON object. No markdown, commentary, or extra text—strict JSON for parsing.
-Return JSON now:
+Provide your review.
     """
-
-
-def execute_prompt(prompt, model_key, max_output_tokens=1024):
-    """
-    Send the prompt to OpenRouter via the OpenAI SDK.
-    """
-    try:
-        resp = openai_client.chat.completions.create(
-            model=model_key,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=max_output_tokens,
-        )
-        return extract_json(resp.choices[0].message.content)
-    except Exception as e:
-        print(f"Error during model call: {e}")
-        check_credis_and_email()
-        return {}
 
 
 # Main code
 prs = waveassist.fetch_data("pull_requests")
 if prs:
-    model_name = waveassist.fetch_data("model_name") or "anthropic/claude-sonnet-4.5"
+    model_name = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
     additional_context = waveassist.fetch_data("additional_context")
     for pr in prs:
         try:
             if pr.get("comment_generated", False):
                 continue
             prompt = get_prompt(pr, additional_context=additional_context)
-            review_dict = execute_prompt(prompt, model_name)
+            result = waveassist.call_llm(
+                model=model_name,
+                prompt=prompt,
+                response_model=PRReviewResult,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
 
-            if not review_dict:
+            if not result:
                 raise Exception("❌ Review not generated.")
 
+            review_dict = result.model_dump(by_alias=True)
             pr.update(
                 review_dict=review_dict, comment_generated=True, comment_posted=False
             )
