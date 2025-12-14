@@ -3,7 +3,7 @@ import waveassist
 import json
 
 # Initialize WaveAssist
-waveassist.init()
+waveassist.init(check_credits=True)
 
 # Constants
 INTRO_COMMENT = "_Here’s an automated AI-generated review to support your development workflow._\n\n"
