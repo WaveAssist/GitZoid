@@ -31,7 +31,7 @@ nodes:
 variables:
   - type: github
     name: github
-    display_name: GitHub Connection
+    display_name: GitHub
     key: github
     is_optional: false
     scopes: ["repo"]
@@ -39,7 +39,7 @@ variables:
     helper_message: "Connect your GitHub account to the app"
   - name: model_name
     key: model_name
-    display_name: Model Name
+    display_name: Model name
     value: "anthropic/claude-haiku-4.5"
     type: "string"
     is_optional: true
@@ -62,7 +62,7 @@ variables:
 
   - name: additional_context
     key: additional_context
-    display_name: Additional Context (if any)
+    display_name: Additional context
     value: ""
     type: "string"
     is_optional: true
