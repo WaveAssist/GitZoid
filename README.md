@@ -47,9 +47,9 @@ Deploy instantly on [WaveAssist](https://waveassist.io)—a zero-infra automatio
 
 1. Click the button or visit [waveassist.io/templates/gitzoid-template](https://waveassist.io/templates/gitzoid-template).
 2. Enter your Github Personal Acccess token:
-   * `github_ghp_token`
-     *(no OpenAI/Anthropic key needed!)*
-   * Cick here to know how to generate your GitHub token: [How to Get GitHub Token](https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic)
+   - `github_ghp_token`
+     _(no OpenAI/Anthropic key needed!)_
+   - Cick here to know how to generate your GitHub token: [How to Get GitHub Token](https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic)
 3. Click **Run & Deploy** to schedule automatic reviews.
 
 ✅ You’re now running GitZoid on autopilot.
@@ -66,8 +66,8 @@ Deploy instantly on [WaveAssist](https://waveassist.io)—a zero-infra automatio
 
 Head to [gitzoid.com](https://gitzoid.com), enter:
 
-* Your GitHub token
-* Repositories to monitor
+- Your GitHub token
+- Repositories to monitor
 
 GitZoid uses hosted AI credits to review and comment on your PRs—no keys or setup required.
 
@@ -79,25 +79,43 @@ Want full control on your own infra? Clone this repo and schedule scripts howeve
 
 Scripts:
 
-* `initialize_repositories.py`: seed your repos
-* `fetch_pull_requests.py`: pull in new PRs
-* `generate_review.py`: call OpenRouter’s AI via your free token
-* `post_comment.py`: post feedback back to GitHub
+- `initialize_repositories.py`: seed your repos
+- `fetch_pull_requests.py`: pull in new PRs
+- `generate_review.py`: call OpenRouter’s AI via your free token
+- `post_comment.py`: post feedback back to GitHub
 
 ---
 
 ## Features
 
-* **Zero-Key AI**
+- **Zero-Key AI**
   WaveAssist provides an OpenRouter AI token free up to a generous limit—no GPT or Claude keys needed.
-* **One-Time Repo Init**
+- **One-Time Repo Init**
   Seed your repo list into WaveAssist or a local store.
-* **Automated PR Monitoring**
+- **Automated PR Monitoring**
   Polls for new pull requests at your chosen interval.
-* **AI-Powered Reviews**
+- **AI-Powered Reviews**
   Structured, friendly feedback generated and posted automatically.
-* **Configurable**
+- **Incremental Reviews** ✨ **NEW**
+  When new commits are pushed to a PR, GitZoid automatically detects the changes and posts a follow-up review covering:
+  - **Changes Summary**: What the new commits do
+  - **Addressed Issues**: Which previous concerns were fixed
+  - **New Observations**: Any new issues or suggestions
+- **Configurable**
   Per-repo branch and model settings (Claude or GPT through OpenRouter).
+
+---
+
+## How Incremental Reviews Work
+
+GitZoid tracks the last reviewed commit SHA for each PR. When it detects new commits:
+
+1. **Detection**: Compares `head.sha` from GitHub with the stored `last_reviewed_sha`
+2. **Diff Fetching**: Uses GitHub's Compare API to fetch only the new changes
+3. **Context-Aware Review**: Fetches previous GitZoid comments to understand what was already flagged
+4. **Focused Feedback**: Posts an incremental review that acknowledges addressed issues and highlights new concerns
+
+This ensures your team gets relevant, focused feedback on each iteration—not repeated comments about code that hasn't changed.
 
 ---
 
