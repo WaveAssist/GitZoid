@@ -158,8 +158,11 @@ Additional context:
 ---
 """
 
-    previous_sha = review_pr.get("previous_sha", "")[:7]
-    current_sha = review_pr.get("current_sha", "")[:7]
+    # Safely extract SHA values, handling None or empty strings
+    previous_sha_raw = review_pr.get("previous_sha") or ""
+    current_sha_raw = review_pr.get("current_sha") or ""
+    previous_sha = previous_sha_raw[:7] if previous_sha_raw else ""
+    current_sha = current_sha_raw[:7] if current_sha_raw else ""
 
     return f"""
 You are an experienced senior software engineer reviewing NEW COMMITS pushed to an existing GitHub pull request.

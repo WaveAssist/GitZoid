@@ -48,6 +48,9 @@ def generate_full_comment(review_dict: dict) -> str:
 
 def generate_incremental_comment(review_dict: dict, previous_sha: str = "", current_sha: str = "") -> str:
     """Generate comment for incremental PR review after new commits."""
+    # Ensure all expected keys exist (defensive programming for IncrementalReviewResult)
+    if not isinstance(review_dict, dict):
+        review_dict = {}
     changes_summary = review_dict.get("changes_summary", [])
     addressed_issues = review_dict.get("addressed_issues", [])
     new_observations = review_dict.get("new_observations", [])
