@@ -36,8 +36,14 @@ Thumbs.db
 # Test coverage and profiling
 coverage.xml
 .coverage
-.cache/
+.coverage.*
+*.cover
+htmlcov/
 .pytest_cache/
+.tox/
+.mypy_cache/
+.hypothesis/
+.cache/
 
 # Jupyter notebooks (if any)
 .ipynb_checkpoints/
