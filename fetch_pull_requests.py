@@ -85,7 +85,32 @@ def is_bot_pr(pr: dict) -> bool:
     """Check if PR is from a bot."""
     author = pr.get("user") or {}
     login = (author.get("login") or "").lower()
-    return author.get("type") == "Bot" or login.endswith("[bot]")
+    
+    # Check if type is Bot
+    if author.get("type") == "Bot":
+        return True
+    
+    # Check if login ends with [bot]
+    if login.endswith("[bot]"):
+        return True
+    
+    # Check for common bot names (even without [bot] suffix)
+    common_bots = [
+        "dependabot",
+        "renovate",
+        "github-actions",
+        "codecov",
+        "greenkeeper",
+        "snyk-bot",
+        "mergify",
+        "stale",
+        "allcontributors",
+        "imgbot",
+    ]
+    if login in common_bots:
+        return True
+    
+    return False
 
 
 def is_old_pr(pr: dict, days: int = 30) -> bool:
