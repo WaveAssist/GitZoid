@@ -55,7 +55,8 @@ def update_last_checked(repos: List[Dict], owner: str, name: str, new_time: str)
                 new_dt = datetime.fromisoformat(new_time.replace("Z", "+00:00"))
                 if not current or datetime.fromisoformat(current.replace("Z", "+00:00")) < new_dt:
                     repo["last_checked"] = new_time
-            except Exception:
+            except Exception as e:
+                log(f"⚠️  Error parsing timestamp for {owner}/{name}: {type(e).__name__}: {e} | new_time='{new_time}' | current='{current}'")
                 repo["last_checked"] = new_time  # fallback in case of malformed timestamp
             break
 
