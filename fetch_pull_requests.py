@@ -105,11 +105,13 @@ def build_pr_data(
     processed_files: list,
     review_type: str,
     current_sha: str,
+    repo_path: str,
     previous_sha: str = None,
     previous_review_text: str = None
 ) -> dict:
     """Build PR data dictionary for review."""
     pr_data = {
+        "id": repo_path,  # Store repo_path as "id" for use in post_comment.py
         "pr_number": pr.get("number"),
         "title": pr.get("title"),
         "body": pr.get("body"),
@@ -192,7 +194,7 @@ def fetch_and_process_prs(
                     processed_files = fetch_pr_files(repo_path, pr_number, headers)
                     if processed_files:
                         pr_data = build_pr_data(
-                            pr, processed_files, "full", head_sha
+                            pr, processed_files, "full", head_sha, repo_path
                         )
                         prs_to_review.append(pr_data)
                         processed_count += 1
@@ -222,7 +224,7 @@ def fetch_and_process_prs(
                             
                             if new_files:
                                 pr_data = build_pr_data(
-                                    pr, new_files, "incremental", head_sha, stored_sha, previous_review_text
+                                    pr, new_files, "incremental", head_sha, repo_path, stored_sha, previous_review_text
                                 )
                                 prs_to_review.append(pr_data)
                 else:
@@ -230,7 +232,7 @@ def fetch_and_process_prs(
                     processed_files = fetch_pr_files(repo_path, pr_number, headers)
                     if processed_files:
                         pr_data = build_pr_data(
-                            pr, processed_files, "full", head_sha
+                            pr, processed_files, "full", head_sha, repo_path
                         )
                         prs_to_review.append(pr_data)
         except Exception as e:
