@@ -241,7 +241,7 @@ if prs:
                     comment_posted=False,
                     review_type="incremental"
                 )
-                print(f"✅ PR #{pr.get("pr_number")} incremental review generated.")
+                print(f"✅ PR #{pr.get('pr_number')} incremental review generated.")
             else:
                 # Full review for new PRs
                 prompt = get_full_review_prompt(pr, additional_context=additional_context)
@@ -263,7 +263,7 @@ if prs:
                     comment_posted=False,
                     review_type="full"
                 )
-                print(f"✅ PR #{pr.get("pr_number")} full review generated.")
+                print(f"✅ PR #{pr.get('pr_number')} full review generated.")
                 
         except Exception as e:
             print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
