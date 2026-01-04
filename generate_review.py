@@ -113,7 +113,7 @@ Where:
 Note: Some files may be truncated here for tokens optimisation. That's ok. Post your analysis based on available context.
 
 Guidelines:
-- Tone: Friendly, short and to the point.
+- Tone: Friendly, short and to the point. Avoid using emojis.
 - Limit to 2-3 points per section, unless more are clearly needed.
 - Do not repeat raw code or repeat the same thing in different points.  
     
@@ -192,7 +192,7 @@ New Changes (files modified since last review):
 
 Guidelines:
 - Focus ONLY on the new changes.
-- Tone: Friendly, short and to the point.
+- Tone: Friendly, short and to the point. Avoid using emojis.
 - Limit to 2-3 points per section, unless more are clearly needed.
 - Do not repeat raw code or repeat the same thing in different points.  
 - If the new commits seem to address previous concerns, acknowledge that positively.
