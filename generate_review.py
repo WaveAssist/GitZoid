@@ -203,10 +203,10 @@ Provide your incremental review.
 
 
 # Main code
-prs = waveassist.fetch_data("pull_requests")
+prs = waveassist.fetch_data("pull_requests") or []
 if prs:
     model_name = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
-    additional_context = waveassist.fetch_data("additional_context")
+    additional_context = waveassist.fetch_data("additional_context") or ""
     
     for pr in prs:
         try:
@@ -241,7 +241,7 @@ if prs:
                     comment_posted=False,
                     review_type="incremental"
                 )
-                print(f"✅ PR #{pr['pr_number']} incremental review generated.")
+                print(f"✅ PR #{pr.get("pr_number")} incremental review generated.")
             else:
                 # Full review for new PRs
                 prompt = get_full_review_prompt(pr, additional_context=additional_context)
@@ -263,7 +263,7 @@ if prs:
                     comment_posted=False,
                     review_type="full"
                 )
-                print(f"✅ PR #{pr['pr_number']} full review generated.")
+                print(f"✅ PR #{pr.get("pr_number")} full review generated.")
                 
         except Exception as e:
             print(f"❌ PR #{pr.get('pr_number')} failed: {e}")

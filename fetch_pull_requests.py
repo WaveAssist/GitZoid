@@ -110,7 +110,7 @@ def build_pr_data(
 ) -> dict:
     """Build PR data dictionary for review."""
     pr_data = {
-        "pr_number": pr["number"],
+        "pr_number": pr.get("number"),
         "title": pr.get("title"),
         "body": pr.get("body"),
         "pr_created_at": pr.get("created_at"),
@@ -274,8 +274,8 @@ def fetch_and_process_prs(
 
 
 # Fetch input from WaveAssist
-repositories = waveassist.fetch_data("github_selected_resources")
-access_token = waveassist.fetch_data("github_access_token")
+repositories = waveassist.fetch_data("github_selected_resources") or []
+access_token = waveassist.fetch_data("github_access_token") or ""
 
 # Fetch existing reviewed PRs tracker
 reviewed_prs = waveassist.fetch_data("reviewed_prs") or {}

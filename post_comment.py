@@ -120,7 +120,7 @@ for pr in prs_to_review:
         break
 
 if should_process:
-    github_token = waveassist.fetch_data("github_access_token")
+    github_token = waveassist.fetch_data("github_access_token") or ""
     reviewed_prs = waveassist.fetch_data("reviewed_prs") or {}
     
     display_output_content = "<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; line-height: 1.5;\">"
@@ -139,8 +139,8 @@ if should_process:
         if not review_dict:
             continue
 
-        repo_path = pr["id"]
-        pr_number = pr["pr_number"]
+        repo_path = pr.get("id")
+        pr_number = pr.get("pr_number")
         review_type = pr.get("review_type", "full")
         current_sha = pr.get("current_sha", "")
         
