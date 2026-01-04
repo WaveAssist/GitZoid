@@ -24,10 +24,18 @@ def format_changed_files(files, max_chars=25000):
     blocks, total = [], 0
     for idx, f in enumerate(files, 1):
         try:
-            if "patch" not in f or f["patch"] is None:
-                block = f"{idx}. Filename: `{f['filename']}`\n*No diff available for this file.*"
+            patch = f.get("patch", "")
+            status = f.get("status", "modified")
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            
+            status_badge = f"[{status}]" if status != "modified" else ""
+            stats = f"(+{additions}/-{deletions})" if additions or deletions else ""
+            
+            if not patch:
+                block = f"{idx}. Filename: `{f['filename']}` {status_badge} {stats}\n*No diff available for this file.*"
             else:
-                block = f"{idx}. Filename: `{f['filename']}`\n```\n{f['patch']}\n```"
+                block = f"{idx}. Filename: `{f['filename']}` {status_badge} {stats}\n```\n{patch}\n```"
 
             length = len(block)
             blocks.append((length, block))
@@ -59,19 +67,28 @@ def format_changed_files(files, max_chars=25000):
     return "\n\n".join(included)
 
 
+# Pydantic models for structured output
 class PRReviewResult(BaseModel):
+    """Model for full (first-time) PR review."""
     summary: list[str]
     potential_issues: list[str]
     potential_optimizations: list[str]
     suggestions: list[str]
 
 
-def get_prompt(review_pr, max_input_tokens=20000, additional_context=None):
+class IncrementalReviewResult(BaseModel):
+    """Model for incremental (follow-up) PR review after new commits."""
+    changes_summary: list[str]
+    addressed_issues: list[str]
+    new_observations: list[str]
+
+
+def get_full_review_prompt(review_pr, max_input_tokens=20000, additional_context=None):
+    """Generate prompt for first-time full PR review."""
     formatted_files = format_changed_files(
         review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
     )
 
-    # Build additional context section if provided
     context_section = ""
     if additional_context and additional_context.strip():
         context_section = f"""
@@ -117,32 +134,137 @@ Provide your review.
     """
 
 
+def get_incremental_review_prompt(review_pr, previous_review=None, max_input_tokens=20000, additional_context=None):
+    """Generate prompt for incremental review after new commits."""
+    formatted_files = format_changed_files(
+        review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
+    )
+
+    context_section = ""
+    if additional_context and additional_context.strip():
+        context_section = f"""
+---
+Additional context:
+{additional_context.strip()}
+---
+"""
+
+    previous_review_section = ""
+    if previous_review:
+        previous_review_section = f"""
+---
+**Previous GitZoid Review (for reference):**
+{previous_review}
+---
+"""
+
+    # Safely extract SHA values, handling None or empty strings
+    previous_sha_raw = review_pr.get("previous_sha") or ""
+    current_sha_raw = review_pr.get("current_sha") or ""
+    previous_sha = previous_sha_raw[:7] if previous_sha_raw else ""
+    current_sha = current_sha_raw[:7] if current_sha_raw else ""
+
+    return f"""
+You are an experienced senior software engineer reviewing NEW COMMITS pushed to an existing GitHub pull request.
+This is a FOLLOW-UP review - the PR was previously reviewed, and new code has been pushed.
+
+Your task is to analyze ONLY the new changes (diff from commit {previous_sha} to {current_sha}) and provide:
+1. `changes_summary`: What these new commits do - summarize the changes made.
+2. `addressed_issues`: Which issues from the previous review (if any) have been addressed by these changes.
+3. `new_observations`: Any NEW issues, concerns, or suggestions based on the new code (optional - use empty array if none).
+
+{previous_review_section}
+
+{context_section}
+
+**NEW CHANGES TO REVIEW:**
+---
+PR Metadata:
+  - PR Number: {review_pr.get("pr_number")}
+  - Title: {review_pr.get("title")}
+  - Description: {review_pr.get("body")}
+  - Previous SHA: {previous_sha}
+  - Current SHA: {current_sha}
+---
+New Changes (files modified since last review):
+{formatted_files}
+---
+
+Guidelines:
+- Focus ONLY on the new changes.
+- Tone: Friendly, short and to the point.
+- Limit to 2-3 points per section, unless more are clearly needed.
+- Do not repeat raw code or repeat the same thing in different points.  
+- If the new commits seem to address previous concerns, acknowledge that positively.
+- For `new_observations`, only include if there are genuine new concerns.
+
+Provide your incremental review.
+"""
+
+
 # Main code
-prs = waveassist.fetch_data("pull_requests")
+prs = waveassist.fetch_data("pull_requests") or []
 if prs:
     model_name = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
-    additional_context = waveassist.fetch_data("additional_context")
+    additional_context = waveassist.fetch_data("additional_context") or ""
+    
     for pr in prs:
         try:
             if pr.get("comment_generated", False):
                 continue
-            prompt = get_prompt(pr, additional_context=additional_context)
-            result = waveassist.call_llm(
-                model=model_name,
-                prompt=prompt,
-                response_model=PRReviewResult,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            
+            review_type = pr.get("review_type", "full")
+            
+            if review_type == "incremental":
+                # Incremental review for new commits
+                previous_review = pr.get("previous_review_text")
+                prompt = get_incremental_review_prompt(
+                    pr, 
+                    previous_review=previous_review,
+                    additional_context=additional_context
+                )
+                result = waveassist.call_llm(
+                    model=model_name,
+                    prompt=prompt,
+                    response_model=IncrementalReviewResult,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                
+                if not result:
+                    raise Exception("❌ Incremental review not generated.")
+                
+                review_dict = result.model_dump(by_alias=True)
+                pr.update(
+                    review_dict=review_dict,
+                    comment_generated=True,
+                    comment_posted=False,
+                    review_type="incremental"
+                )
+                print(f"✅ PR #{pr.get("pr_number")} incremental review generated.")
+            else:
+                # Full review for new PRs
+                prompt = get_full_review_prompt(pr, additional_context=additional_context)
+                result = waveassist.call_llm(
+                    model=model_name,
+                    prompt=prompt,
+                    response_model=PRReviewResult,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
 
-            if not result:
-                raise Exception("❌ Review not generated.")
+                if not result:
+                    raise Exception("❌ Review not generated.")
 
-            review_dict = result.model_dump(by_alias=True)
-            pr.update(
-                review_dict=review_dict, comment_generated=True, comment_posted=False
-            )
-            print(f"✅ PR #{pr['pr_number']} reviewed.")
+                review_dict = result.model_dump(by_alias=True)
+                pr.update(
+                    review_dict=review_dict,
+                    comment_generated=True,
+                    comment_posted=False,
+                    review_type="full"
+                )
+                print(f"✅ PR #{pr.get("pr_number")} full review generated.")
+                
         except Exception as e:
             print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
             pr.update(review_dict={}, comment_generated=False, comment_posted=False)

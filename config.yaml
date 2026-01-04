@@ -1,7 +1,7 @@
 name: Gitzoid
-description: AI-powered GitHub bot that monitors pull requests, generates structured reviews, and posts them back.
-success_message: Gitzoid is setup and running. It will auto review all your new pull requests within a few minutes.
-output_default_message: "Run completed, no new pull requests to review. \n<br> Gitzoid will automatically review all your new pull requests."
+description: AI-powered GitHub bot that monitors pull requests, generates structured reviews, and posts them back. Automatically detects new commits and provides incremental reviews.
+success_message: Gitzoid is setup and running. It will auto review all your new pull requests and follow-up commits within a few minutes.
+output_default_message: "Run completed, no new pull requests to review. \n<br> Gitzoid will automatically review all your new pull requests and incremental changes."
 
 requirements:
   - openai
