@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 # Constants
 TOKEN_MULTIPLIER = 2.5
-max_tokens = 1024
+max_tokens = 2048
 temperature = 0.5
 
 waveassist.init(check_credits=True)
