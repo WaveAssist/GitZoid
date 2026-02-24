@@ -47,18 +47,24 @@ variables:
     options:
       - name: Claude Haiku 4.5
         key: anthropic/claude-haiku-4.5
-      - name: Claude Sonnet 4.5
-        key: anthropic/claude-sonnet-4.5
+      - name: Claude Sonnet 4.6
+        key: anthropic/claude-sonnet-4.6
+      - name: Claude Opus 4.6
+        key: anthropic/claude-opus-4.6
       - name: Grok Code Fast 1
         key: x-ai/grok-code-fast-1
-      - name: Claude Sonnet 4
-        key: anthropic/claude-sonnet-4
-      - name: Gemini 2.5 Flash
-        key: google/gemini-2.5-flash
-      - name: DeepSeek Chat V3.1
-        key: deepseek/deepseek-chat-v3.1
-      - name: GPT-5 Mini
-        key: openai/gpt-5-mini
+      - name: Gemini 3 Flash
+        key: google/gemini-3-flash-preview
+      - name: DeepSeek V3.2
+        key: deepseek/deepseek-v3.2
+      - name: Gemini 3.1 Pro
+        key: google/gemini-3.1-pro-preview
+      - name: GPT-5.2
+        key: openai/gpt-5.2
+      - name: Minimax M2.5
+        key: minimax/minimax-m2.5
+      - name: Kimi K2.5
+        key: moonshotai/kimi-k2.5
 
   - name: schedule
     key: schedule
