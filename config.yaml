@@ -37,6 +37,8 @@ variables:
     scopes: ["repo"]
     required_resources: ["repos"]
     helper_message: "Connect your GitHub account to the app"
+    display_type: "base"
+
   - name: model_name
     key: model_name
     display_name: Model name
