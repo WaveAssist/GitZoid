@@ -205,18 +205,26 @@ Provide your incremental review.
 # Main code
 prs = waveassist.fetch_data("pull_requests") or []
 if prs:
-    model_name = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
-    additional_context = waveassist.fetch_data("additional_context") or ""
-    
+    repositories = waveassist.fetch_data("github_selected_resources") or []
+    repo_config = {r["id"]: r.get("properties", {}) for r in repositories}
+
+    # Legacy fallback: if no per-repo properties exist, check for global values
+    global_model = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
+    global_context = waveassist.fetch_data("additional_context") or ""
+
     for pr in prs:
         try:
             if pr.get("comment_generated", False):
                 continue
-            
+
+            repo_path = pr.get("id", "")
+            props = repo_config.get(repo_path, {})
+            model_name = props.get("model_name") or global_model
+            additional_context = props.get("additional_context") or global_context
+
             review_type = pr.get("review_type", "full")
             
             if review_type == "incremental":
-                # Incremental review for new commits
                 previous_review = pr.get("previous_review_text")
                 prompt = get_incremental_review_prompt(
                     pr, 
@@ -241,9 +249,8 @@ if prs:
                     comment_posted=False,
                     review_type="incremental"
                 )
-                print(f"✅ PR #{pr.get('pr_number')} incremental review generated.")
+                print(f"✅ PR #{pr.get('pr_number')} incremental review generated (model={model_name}).")
             else:
-                # Full review for new PRs
                 prompt = get_full_review_prompt(pr, additional_context=additional_context)
                 result = waveassist.call_llm(
                     model=model_name,
@@ -263,7 +270,7 @@ if prs:
                     comment_posted=False,
                     review_type="full"
                 )
-                print(f"✅ PR #{pr.get('pr_number')} full review generated.")
+                print(f"✅ PR #{pr.get('pr_number')} full review generated (model={model_name}).")
                 
         except Exception as e:
             print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
