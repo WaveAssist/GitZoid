@@ -1,3 +1,4 @@
+import html
 import requests
 import waveassist
 from datetime import datetime, timezone
@@ -174,7 +175,14 @@ if should_process:
                 update_reviewed_prs(reviewed_prs, repo_path, pr_number, current_sha, full_body)
                 reviewed_prs_changed = True
             
-            display_output_content += f'<div style="margin-bottom: 8px; color: #28a745;">✅ {review_label.title()} review posted to <strong>{repo_path}</strong> PR #{pr_number}</div>'
+            pr_comment_url = result.get("html_url") or f"https://github.com/{repo_path}/pull/{pr_number}"
+            safe_href = html.escape(pr_comment_url, quote=True)
+            display_output_content += (
+                f'<div style="margin-bottom: 8px; color: #28a745;">'
+                f'✅ {review_label.title()} review posted to <strong>{html.escape(repo_path)}</strong> PR #{pr_number}. '
+                f'<a href="{safe_href}" target="_blank" rel="noopener noreferrer">{html.escape(pr_comment_url)}</a>'
+                f"</div>"
+            )
 
     # Persist updates
     display_output_content += '<div style="margin-top: 12px; color: #28a745;">✅ Repositories and PRs updated successfully.</div></div>'
