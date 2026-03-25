@@ -4,6 +4,8 @@ import waveassist
 
 FIRST_RUN_LIMIT = 2
 MINIMUM_CREDITS_REQUIRED = 0.1
+# Runs UI: estimated seconds per PR for downstream generate_review + post_comment.
+PROCESSING_TIME_PER_PR = 2
 
 waveassist.init()
 
@@ -321,5 +323,12 @@ if reviewed_prs_changed:
     waveassist.store_data("reviewed_prs", reviewed_prs)
 
 if all_pull_requests:
+    time_to_process = len(all_pull_requests) * PROCESSING_TIME_PER_PR
+    waveassist.store_data(
+        "tentative_time_to_process",
+        str(time_to_process),
+        run_based=True,
+        data_type="string",
+    )
     waveassist.store_data("pull_requests", all_pull_requests)
     print(f"✅ Fetched and stored {len(all_pull_requests)} PRs.")
