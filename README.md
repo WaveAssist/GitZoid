@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="https://waveassist.io/images/templates/gitzoid/GitzoidLogoDark.png" alt="GitZoid Logo" width="200" />
+  <img src="https://waveassist.io/images/templates/gitzoid/GitzoidLogoDark.png" alt="GitZoid - Open-source AI agent for GitHub PR reviews" width="200" />
 </p>
 
-<h1 align="center">GitZoid: Open-Source AI-Powered GitHub PR Reviewer</h1>
+<h1 align="center">GitZoid: Open-Source AI Agent for GitHub PR Reviews</h1>
 
 <p align="center">
-  <a href="https://waveassist.io/templates/gitzoid-template">
-    <img src="https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B" alt="Deploy with WaveAssist" />
+  <a href="https://waveassist.io/assistants/gitzoid">
+    <img src="https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B" alt="Deploy GitZoid on WaveAssist" />
   </a>
-  <img src="https://img.shields.io/badge/GitZoid-AI%20Powered%20PR%20Reviews-blue" alt="GitZoid Badge" />
+  <img src="https://img.shields.io/badge/GitZoid-AI%20Agent%20for%20PR%20Reviews-blue" alt="GitZoid AI agent badge" />
   <a href="https://opensource.org/licenses/MIT">
     <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" />
   </a>
@@ -21,12 +21,12 @@
 
 ## Overview
 
-GitZoid is an **open-source** GitHub bot that automates pull-request reviews using AI models—no separate GPT or Claude keys required! On WaveAssist, your OpenRouter token is included free up to a generous usage limit. WaveAssist handles node orchestration, scheduling, secrets storage, and hosting for you. You can also run GitZoid as a standalone Python app if you prefer.
+GitZoid is an **open-source AI agent** that automates GitHub pull-request reviews—no separate GPT or Claude keys required! On WaveAssist, your OpenRouter token is included free up to a generous usage limit. WaveAssist handles node orchestration, scheduling, secrets storage, and hosting for you. You can also run GitZoid as a standalone Python app if you prefer.
 
 Try the **hosted version** at [https://gitzoid.com](https://gitzoid.com) — no setup required.
 
 <p align="center">
-  <img src="https://waveassist.io/images/templates/gitzoid/pr_review.png" alt="GitZoid UI Preview" width="100%" />
+  <img src="https://waveassist.io/images/templates/gitzoid/pr_review.png" alt="GitZoid AI agent posting an automated GitHub pull request review" width="100%" />
 </p>
 
 ---
@@ -36,20 +36,20 @@ Try the **hosted version** at [https://gitzoid.com](https://gitzoid.com) — no 
 ### 1. One-Click Deploy on WaveAssist (Recommended)
 
 <p>
-  <a href="https://waveassist.io/templates/gitzoid-template" target="_blank">
-    <img src="https://waveassist.io/images/templates/Button.png" alt="Deploy on WaveAssist" width="230" />
+  <a href="https://waveassist.io/assistants/gitzoid" target="_blank">
+    <img src="https://waveassist.io/images/templates/Button.png" alt="Deploy GitZoid on WaveAssist" width="230" />
   </a>
 </p>
 
-Deploy instantly on [WaveAssist](https://waveassist.io)—a zero-infra automation platform that handles everything (including your free OpenRouter AI token).
+Deploy instantly on [WaveAssist](https://waveassist.io)—a zero-infra AI agent platform that handles everything (including your free OpenRouter AI token).
 
 #### How to Use:
 
-1. Click the button or visit [waveassist.io/templates/gitzoid-template](https://waveassist.io/templates/gitzoid-template).
-2. Enter your Github Personal Acccess token:
+1. Click the button or visit [waveassist.io/assistants/gitzoid](https://waveassist.io/assistants/gitzoid).
+2. Enter your GitHub Personal Access token:
    - `github_ghp_token`
      _(no OpenAI/Anthropic key needed!)_
-   - Cick here to know how to generate your GitHub token: [How to Get GitHub Token](https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic)
+   - Click here to learn how to generate your GitHub token: [How to Get GitHub Token](https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic)
 3. Click **Run & Deploy** to schedule automatic reviews.
 
 ✅ You’re now running GitZoid on autopilot.
@@ -60,7 +60,7 @@ Deploy instantly on [WaveAssist](https://waveassist.io)—a zero-infra automatio
 
 <p>
   <a href="https://gitzoid.com" target="_blank">
-    <img src="https://img.shields.io/badge/%20Use%20GitZoid.com-No%20API%20Key%20Needed-0e1c3a" alt="Use GitZoid.com" />
+    <img src="https://img.shields.io/badge/%20Use%20GitZoid.com-No%20API%20Key%20Needed-0e1c3a" alt="Use GitZoid.com - hosted AI PR review agent" />
   </a>
 </p>
 
