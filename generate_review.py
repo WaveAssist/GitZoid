@@ -1,10 +1,25 @@
+"""
+generate_review.py — brain-aware, precision-first PR review.
+
+For each pending PR it builds a review prompt enriched with the repo's brain profile
+(profile:{owner/repo}, attached by fetch_pull_requests as `brain_profile`), calls the LLM for
+structured findings, then runs a DETERMINISTIC gate + a light security sweep so only
+high-signal, anchored findings survive. The gate (not the model) is the single authority for
+the verdict. Conventions: flat script, no __main__ guard, init() first, fall-through on empty.
+"""
+import hashlib
+import re
 import waveassist
-from pydantic import BaseModel
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
 
 # Constants
 TOKEN_MULTIPLIER = 2.5
-max_tokens = 2048
-temperature = 0.5
+MAX_TOKENS = 4096
+MAX_INLINE_FINDINGS = 8
+DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
+_SEV_RANK = {"high": 0, "medium": 1, "low": 2}
+_CONF_RANK = {"high": 0, "medium": 1, "low": 2}
 
 waveassist.init(check_credits=True)
 
@@ -28,10 +43,10 @@ def format_changed_files(files, max_chars=25000):
             status = f.get("status", "modified")
             additions = f.get("additions", 0)
             deletions = f.get("deletions", 0)
-            
+
             status_badge = f"[{status}]" if status != "modified" else ""
             stats = f"(+{additions}/-{deletions})" if additions or deletions else ""
-            
+
             if not patch:
                 block = f"{idx}. Filename: `{f['filename']}` {status_badge} {stats}\n*No diff available for this file.*"
             else:
@@ -67,150 +82,370 @@ def format_changed_files(files, max_chars=25000):
     return "\n\n".join(included)
 
 
-# Pydantic models for structured output
-class PRReviewResult(BaseModel):
-    """Model for full (first-time) PR review."""
-    summary: list[str]
-    potential_issues: list[str]
-    potential_optimizations: list[str]
-    suggestions: list[str]
+# ---------------------------------------------------------------- models
+
+class Finding(BaseModel):
+    """One review finding. line/side optional → unanchored findings degrade to summary-only."""
+    path: str = Field(default="", description="Repo-relative path, or '' if cross-cutting")
+    line: Optional[int] = Field(default=None,
+        description="1-based line in the NEW file that is part of this PR's diff")
+    side: Optional[Literal["RIGHT", "LEFT"]] = Field(default="RIGHT",
+        description="RIGHT for added/context lines (almost always); LEFT only for a removed line")
+    severity: Literal["high", "medium", "low"] = Field(
+        description="high=likely bug/security/breakage; medium=correctness smell; low=nit")
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="how sure this is real on this exact line")
+    category: Literal["bug", "security", "optimization", "suggestion"] = Field(
+        description="bug=correctness; security=secret/injection/authz; optimization=perf/readability; suggestion=nit/style")
+    body: str = Field(description="One or two sentences. Neutral, no praise, no alarm, no emojis.")
+    suggested_replacement: Optional[str] = Field(default=None,
+        description="ONLY for a mechanical single-line fix: exact replacement for `line`. Omit otherwise.")
+
+
+class ReviewResult(BaseModel):
+    """Full (first-time) PR review. No verdict field — the gate computes the verdict."""
+    summary: List[str] = Field(default_factory=list,
+        description="1-2 short plain-English points: what this PR does")
+    findings: List[Finding] = Field(default_factory=list)
+    potential_optimizations: List[str] = Field(default_factory=list,
+        description="Non-blocking improvements (perf/readability) — the valued 'Potential Optimizations' tier")
+    suggestions: List[str] = Field(default_factory=list, description="Nits, free-form, capped at render time")
 
 
 class IncrementalReviewResult(BaseModel):
-    """Model for incremental (follow-up) PR review after new commits."""
-    changes_summary: list[str]
-    addressed_issues: list[str]
-    new_observations: list[str]
+    """Incremental review after new commits. Same Finding shape; gate computes the verdict."""
+    changes_summary: List[str] = Field(default_factory=list)
+    addressed_issues: List[str] = Field(default_factory=list,
+        description="Prior findings these commits appear to fix")
+    findings: List[Finding] = Field(default_factory=list)
+    potential_optimizations: List[str] = Field(default_factory=list)
+    suggestions: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------- v2 brain adapters
+
+_AUTH_HINTS = ("auth", "login", "session", "security", "middleware", "token",
+               "jwt", "oauth", "permission", "credential", "password")
+
+
+def _xml(s):
+    return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def brain_secret_locations(profile):
+    """Secret read/store locations from the v2 profile (nested under security)."""
+    if not isinstance(profile, dict):
+        return []
+    return (profile.get("security") or {}).get("secret_locations") or []
+
+
+def brain_auth_files(profile):
+    """Derive auth-sensitive file paths from the v2 key_files (path/role mentions auth-ish terms)."""
+    out = set()
+    if not isinstance(profile, dict):
+        return out
+    for kf in (profile.get("key_files") or []):
+        path = (kf.get("path") or "")
+        role = (kf.get("role") or "").lower()
+        if path and (any(h in path.lower() for h in _AUTH_HINTS) or any(h in role for h in _AUTH_HINTS)):
+            out.add(path)
+    return out
+
+
+def _format_brain_profile(profile):
+    """Render the v2 repo profile into an XML block the model can use to reduce false positives."""
+    if not isinstance(profile, dict) or not profile:
+        return ""
+    arch = (profile.get("architecture_summary") or "").strip()
+    conv = [c for c in (profile.get("conventions") or []) if c]
+    focus = [r for r in (profile.get("review_focus") or []) if r]
+    stk = profile.get("stack") or {}
+    tech = (stk.get("languages") or []) + (stk.get("frameworks") or [])
+    sec = profile.get("security") or {}
+    routes = sec.get("routes") or []
+    secrets = sec.get("secret_locations") or []
+    if not (arch or conv or focus or tech or routes or secrets):
+        return ""
+
+    def items(xs):
+        return "\n".join(f"      <item>{_xml(x)}</item>" for x in xs)
+
+    route_items = "\n".join(
+        f"      <route public=\"{bool(r.get('unauthenticated'))}\">{_xml(r.get('route'))}</route>"
+        for r in routes)
+    return f"""
+  <repo_profile note="Known facts about THIS repo (GitZoid's brain). Use to reduce false positives and judge convention-fit. Do NOT invent issues just because something is listed.">
+    <architecture>{_xml(arch)}</architecture>
+    <stack>{_xml(', '.join(tech))}</stack>
+    <conventions>
+{items(conv)}
+    </conventions>
+    <review_focus>
+{items(focus)}
+    </review_focus>
+    <security_surface>
+{route_items}
+    </security_surface>
+    <secret_locations>
+{items(secrets)}
+    </secret_locations>
+  </repo_profile>"""
+
+
+def _format_context(additional_context):
+    if not additional_context or not str(additional_context).strip():
+        return ""
+    return f"""
+  <additional_context note="Reference only. Use only the parts that help.">
+{str(additional_context).strip()}
+  </additional_context>"""
+
+
+_REVIEW_RULES = """
+  <instructions>
+    You are a precise, senior code reviewer. Review ONLY the provided diff.
+    Output findings as structured objects. Each finding MUST have severity, confidence, category.
+    PRECISION RULES (most important):
+    - Only report something you can justify directly from the shown diff lines.
+    - If unsure, lower confidence — do not omit it.
+    - Do NOT speculate about code you cannot see. Truncated files are fine; review what is visible.
+    - Do NOT restate what the code does. Findings are actionable concerns or concrete improvements.
+    - Neutral framing: describe issue + impact. No praise, no alarm, no emojis.
+    SEVERITY: high=likely runtime bug/data loss/breakage/real security hole; medium=should fix (edge case, weak error handling, convention violation); low=minor/style.
+    CATEGORY: bug | security | optimization | suggestion. Use 'optimization' for perf/readability (valued — include them). Use 'security' only for the sweep items below.
+    SUGGESTION: when a fix is small and unambiguous, include committable code in suggested_replacement; else omit.
+    SECURITY SWEEP (light, high-confidence only):
+    - Newly ADDED line that looks like a live secret (high-entropy token/key). Skip placeholders/test fixtures/examples.
+    - Obvious injection in ADDED lines (string-built SQL/shell/HTML from untrusted input).
+    Suppress placeholders, examples, fixtures. Never report a security item without a concrete added line as basis.
+  </instructions>"""
 
 
 def get_full_review_prompt(review_pr, max_input_tokens=20000, additional_context=None):
-    """Generate prompt for first-time full PR review."""
-    formatted_files = format_changed_files(
-        review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
-    )
-
-    context_section = ""
-    if additional_context and additional_context.strip():
-        context_section = f"""
----
-Additional context provided to help you with the review, just for reference, not necessary to use it, or only use relevant parts if needed:
-##CONTEXT START##
-{additional_context.strip()}
-##CONTEXT END##
----
-"""
-
-    return f"""
-You are an experienced senior software engineer reviewing a GitHub pull request. Provided is the PR metadata and code diffs.
-Your task is to generate a structured, clear, concise, and friendly PR review comment.
-For each section, provide the content as an array of strings representing the numbered list items. If a section has no items (e.g., optional Suggestions & Comments), use an empty array [].
-Where:
-- `summary`: Briefly explain in points what this PR does and the nature of the changes.  
-- `potential_issues`: Identify possible bugs, breaking changes, missing edge cases, or best practice violations in point form.  
-- `potential_optimizations`: Suggest improvements to performance, readability, or simplicity in point form.  
-- `suggestions`: Optional: Praise good practices, suggest tests, or style improvements in point form.  
-
-Note: Some files may be truncated here for tokens optimisation. That's ok. Post your analysis based on available context.
-
-Guidelines:
-- Tone: Friendly, short and to the point. Avoid using emojis.
-- Limit to 2-3 points per section, unless more are clearly needed.
-- Do not repeat raw code or repeat the same thing in different points.  
-    
-{context_section}
-
-*PRIMARY CONTENT TO REVIEW:*
----
-PR Metadata:
-  - PR Number: {review_pr.get("pr_number")}
-  - Title: {review_pr.get("title")}
-  - Description: {review_pr.get("body")}
----
-Changed Files and Diffs:
+    """Brain-aware prompt for a first-time full PR review."""
+    formatted_files = format_changed_files(review_pr.get("files"), int(max_input_tokens * TOKEN_MULTIPLIER))
+    return f"""<pr_review type="full">
+{_REVIEW_RULES}
+{_format_brain_profile(review_pr.get("brain_profile"))}
+{_format_context(additional_context)}
+  <pr_metadata>
+    <number>{review_pr.get("pr_number")}</number>
+    <title>{review_pr.get("title")}</title>
+    <description>{review_pr.get("body")}</description>
+  </pr_metadata>
+  <changed_files note="Some files may be truncated; review what is visible.">
 {formatted_files}
----
-
-Provide your review.
-    """
+  </changed_files>
+  <task>Produce: summary (1-2 sentences), findings[], potential_optimizations[], suggestions[]. Apply the security sweep. Be precise.</task>
+</pr_review>
+"""
 
 
 def get_incremental_review_prompt(review_pr, previous_review=None, max_input_tokens=20000, additional_context=None):
-    """Generate prompt for incremental review after new commits."""
-    formatted_files = format_changed_files(
-        review_pr["files"], int(max_input_tokens * TOKEN_MULTIPLIER)
-    )
-
-    context_section = ""
-    if additional_context and additional_context.strip():
-        context_section = f"""
----
-Additional context:
-{additional_context.strip()}
----
-"""
-
-    previous_review_section = ""
+    """Brain-aware prompt for a follow-up review of NEW commits."""
+    formatted_files = format_changed_files(review_pr.get("files"), int(max_input_tokens * TOKEN_MULTIPLIER))
+    prev_sha = (review_pr.get("previous_sha") or "")[:7]
+    cur_sha = (review_pr.get("current_sha") or "")[:7]
+    previous_block = ""
     if previous_review:
-        previous_review_section = f"""
----
-**Previous GitZoid Review (for reference):**
+        previous_block = f"""
+  <previous_review note="GitZoid's prior review. Use to decide what is now addressed; do NOT re-raise a resolved item.">
 {previous_review}
----
-"""
-
-    # Safely extract SHA values, handling None or empty strings
-    previous_sha_raw = review_pr.get("previous_sha") or ""
-    current_sha_raw = review_pr.get("current_sha") or ""
-    previous_sha = previous_sha_raw[:7] if previous_sha_raw else ""
-    current_sha = current_sha_raw[:7] if current_sha_raw else ""
-
-    return f"""
-You are an experienced senior software engineer reviewing NEW COMMITS pushed to an existing GitHub pull request.
-This is a FOLLOW-UP review - the PR was previously reviewed, and new code has been pushed.
-
-Your task is to analyze ONLY the new changes (diff from commit {previous_sha} to {current_sha}) and provide:
-1. `changes_summary`: What these new commits do - summarize the changes made.
-2. `addressed_issues`: Which issues from the previous review (if any) have been addressed by these changes.
-3. `new_observations`: Any NEW issues, concerns, or suggestions based on the new code (optional - use empty array if none).
-
-{previous_review_section}
-
-{context_section}
-
-**NEW CHANGES TO REVIEW:**
----
-PR Metadata:
-  - PR Number: {review_pr.get("pr_number")}
-  - Title: {review_pr.get("title")}
-  - Description: {review_pr.get("body")}
-  - Previous SHA: {previous_sha}
-  - Current SHA: {current_sha}
----
-New Changes (files modified since last review):
+  </previous_review>"""
+    return f"""<pr_review type="incremental" previous_sha="{prev_sha}" current_sha="{cur_sha}">
+{_REVIEW_RULES}
+{_format_brain_profile(review_pr.get("brain_profile"))}
+{_format_context(additional_context)}{previous_block}
+  <pr_metadata>
+    <number>{review_pr.get("pr_number")}</number>
+    <title>{review_pr.get("title")}</title>
+    <description>{review_pr.get("body")}</description>
+  </pr_metadata>
+  <new_changes note="ONLY the diff from {prev_sha} to {cur_sha}.">
 {formatted_files}
----
-
-Guidelines:
-- Focus ONLY on the new changes.
-- Tone: Friendly, short and to the point. Avoid using emojis.
-- Limit to 2-3 points per section, unless more are clearly needed.
-- Do not repeat raw code or repeat the same thing in different points.  
-- If the new commits seem to address previous concerns, acknowledge that positively.
-- For `new_observations`, only include if there are genuine new concerns.
-
-Provide your incremental review.
+  </new_changes>
+  <task>Produce: changes_summary, addressed_issues[], findings[] for NEW concerns only, potential_optimizations[], suggestions[]. Do not re-raise resolved items. Apply the security sweep to new lines.</task>
+</pr_review>
 """
 
 
-# Main code
-prs = waveassist.fetch_data("pull_requests") or []
-if prs:
-    repositories = waveassist.fetch_data("github_selected_resources") or []
-    repo_config = {r["id"]: r.get("properties", {}) for r in repositories}
+# ---------------------------------------------------------------- diff parsing
 
-    # Legacy fallback: if no per-repo properties exist, check for global values
-    global_model = waveassist.fetch_data("model_name") or "anthropic/claude-haiku-4.5"
-    global_context = waveassist.fetch_data("additional_context") or ""
+def build_diff_lines(files):
+    """Set of (path, side, line) that are commentable: added+context -> RIGHT, removed -> LEFT."""
+    diff_lines = set()
+    for f in (files or []):
+        path = f.get("filename", "")
+        new_ln = old_ln = 0
+        for raw in (f.get("patch", "") or "").splitlines():
+            if raw.startswith("@@"):
+                m = re.search(r"-(\d+)(?:,\d+)?\s+\+(\d+)", raw)
+                if m:
+                    old_ln, new_ln = int(m.group(1)) - 1, int(m.group(2)) - 1
+                continue
+            if raw.startswith("+") and not raw.startswith("+++"):
+                new_ln += 1
+                diff_lines.add((path, "RIGHT", new_ln))
+            elif raw.startswith("-") and not raw.startswith("---"):
+                old_ln += 1
+                diff_lines.add((path, "LEFT", old_ln))
+            else:
+                new_ln += 1
+                old_ln += 1
+                diff_lines.add((path, "RIGHT", new_ln))
+    return diff_lines
+
+
+def _added_lines(patch):
+    """Yield (lineno_in_new_file, text) for '+' lines only (used by the security sweep)."""
+    new_ln = 0
+    for raw in (patch or "").splitlines():
+        if raw.startswith("@@"):
+            m = re.search(r"\+(\d+)", raw)
+            new_ln = (int(m.group(1)) - 1) if m else new_ln
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            new_ln += 1
+            yield new_ln, raw[1:]
+        elif not raw.startswith("-"):
+            new_ln += 1
+
+
+# ---------------------------------------------------------------- gate
+
+def _sanitize_findings(findings):
+    """soft_parse may null-fill required fields; drop/repair before gating."""
+    out = []
+    for f in (findings or []):
+        f = dict(f)
+        if f.get("severity") not in _SEV_RANK:
+            f["severity"] = "medium"
+        if f.get("confidence") not in _CONF_RANK:
+            f["confidence"] = "low"
+        if f.get("category") not in ("bug", "security", "optimization", "suggestion"):
+            f["category"] = "bug"
+        if f.get("side") not in ("RIGHT", "LEFT"):
+            f["side"] = "RIGHT"
+        if not isinstance(f.get("path"), str):
+            f["path"] = ""
+        if not isinstance(f.get("line"), int):
+            f["line"] = None
+        if not isinstance(f.get("body"), str):
+            f["body"] = ""
+        out.append(f)
+    return out
+
+
+def finding_sig(f):
+    raw = f"{f.get('category', '')}|{f.get('path', '')}|{f.get('line')}|{f.get('side', 'RIGHT')}|" \
+          f"{' '.join((f.get('body') or '').lower().split())[:120]}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def apply_gate(findings, diff_lines, seen_sigs=None, severity_threshold="high"):
+    """Single source of truth for the verdict. Returns (kept_findings, verdict, new_sigs)."""
+    seen_sigs = seen_sigs or set()
+    findings = _sanitize_findings(findings)
+    thr = _SEV_RANK.get(severity_threshold, 0)
+    kept, new_sigs, blocking = [], [], False
+    for f in findings:
+        sig = finding_sig(f)
+        if sig in seen_sigs or sig in new_sigs:        # de-dup against ledger + within batch
+            continue
+        cat, sev, conf = f["category"], f["severity"], f["confidence"]
+        # precision gate for bug/security: high sev OR (medium sev + high conf)
+        if cat in ("bug", "security"):
+            if not (sev == "high" or (sev == "medium" and conf == "high")):
+                continue
+            # per-repo severity threshold floor
+            if _SEV_RANK[sev] > thr:
+                continue
+        # anchored findings must be in the diff; unanchored (no line) allowed → summary-only
+        if f.get("line") is not None and (f["path"], f["side"], f["line"]) not in diff_lines:
+            continue
+        kept.append(f)
+        new_sigs.append(sig)
+        if cat in ("bug", "security") and sev in ("high", "medium") and conf == "high":
+            blocking = True
+    kept.sort(key=lambda f: (f["category"] != "security", _SEV_RANK[f["severity"]],
+                             f.get("path") or "", f.get("line") or 0))
+    kept = kept[:MAX_INLINE_FINDINGS]
+    verdict = "needs_changes" if blocking else ("minor_comments" if kept else "looks_good")
+    return kept, verdict, new_sigs
+
+
+# ---------------------------------------------------------------- light security sweep
+
+_SECRET_PATTERNS = [
+    ("AWS Access Key ID", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("GitHub token", re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}")),
+    ("Slack token", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("Google API key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("Private key block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
+    ("Generic assigned secret", re.compile(
+        r"""(?i)(?:secret|passwd|password|api[_-]?key|token|access[_-]?key)\s*[:=]\s*['"][^'"]{12,}['"]""")),
+]
+_PLACEHOLDER_HINTS = re.compile(r"(?i)(your[_-]?|example|placeholder|changeme|xxxx|dummy|sample|<.*?>|redacted|\.\.\.)")
+_INJECTION_PATTERNS = [
+    ("SQL string concatenation", re.compile(r"""(?i)(?:execute|executemany|query|cursor\.execute)\s*\(\s*(?:f?['"].*?\+|.*?%\s*\()""")),
+    ("Shell with shell=True", re.compile(r"""(?i)subprocess\.[a-z_]+\([^)]*shell\s*=\s*True""")),
+    ("os.system with interpolation", re.compile(r"""(?i)os\.system\(\s*f?['"].*?\{""")),
+]
+
+
+def _is_known_placeholder_location(filename, secret_locations):
+    fn = (filename or "").lower()
+    if any(loc and loc.lower() in fn for loc in (secret_locations or [])):
+        return True
+    return bool(re.search(r"(?i)(test|fixture|example|sample|\.lock$|mock)", fn))
+
+
+def security_sweep(files, brain_profile):
+    """Deterministic high-confidence security Findings (secrets + injection + auth-file tripwire)."""
+    secret_locations = brain_secret_locations(brain_profile)
+    auth_files = brain_auth_files(brain_profile)
+    findings, touched_auth = [], set()
+    for f in (files or []):
+        fname = f.get("filename", "")
+        patch = f.get("patch", "")
+        base = fname.split("/")[-1]
+        if (fname in auth_files or base in {a.split("/")[-1] for a in auth_files}) and fname not in touched_auth:
+            touched_auth.add(fname)
+            findings.append({"path": fname, "line": None, "side": "RIGHT",
+                "severity": "medium", "confidence": "high", "category": "security",
+                "title": "Auth-sensitive file changed — queued for weekly audit",
+                "body": f"`{fname}` is flagged auth-related in the repo profile; deep authz review is deferred to the weekly audit.",
+                "suggested_replacement": None})
+        if _is_known_placeholder_location(fname, secret_locations):
+            continue
+        for ln, text in _added_lines(patch):
+            for label, pat in _SECRET_PATTERNS:
+                if pat.search(text) and not _PLACEHOLDER_HINTS.search(text):
+                    findings.append({"path": fname, "line": ln, "side": "RIGHT",
+                        "severity": "high", "confidence": "high", "category": "security",
+                        "title": f"Possible live {label} committed",
+                        "body": f"An added line in `{fname}` matches a {label} pattern and is not a placeholder. Rotate it and move to a secret store if real.",
+                        "suggested_replacement": None})
+                    break
+            for label, pat in _INJECTION_PATTERNS:
+                if pat.search(text):
+                    findings.append({"path": fname, "line": ln, "side": "RIGHT",
+                        "severity": "high", "confidence": "medium", "category": "security",
+                        "title": f"Possible {label}",
+                        "body": f"Added line in `{fname}` builds a command/query from interpolated input. Use parameterized queries / avoid shell=True.",
+                        "suggested_replacement": None})
+                    break
+    return findings
+
+
+# ---------------------------------------------------------------- driver (flat, fall-through)
+
+prs = waveassist.fetch_data("pull_requests", default=[]) or []
+if prs:
+    repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
+    repo_config = {r["id"]: r.get("properties", {}) for r in repositories if isinstance(r, dict) and r.get("id")}
+    global_model = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL
+    global_context = waveassist.fetch_data("additional_context", default="") or ""
 
     for pr in prs:
         try:
@@ -221,60 +456,39 @@ if prs:
             props = repo_config.get(repo_path, {})
             model_name = props.get("model_name") or global_model
             additional_context = props.get("additional_context") or global_context
-
+            severity_threshold = props.get("severity_threshold") or "high"
             review_type = pr.get("review_type", "full")
-            
+
             if review_type == "incremental":
-                previous_review = pr.get("previous_review_text")
                 prompt = get_incremental_review_prompt(
-                    pr, 
-                    previous_review=previous_review,
-                    additional_context=additional_context
-                )
-                result = waveassist.call_llm(
-                    model=model_name,
-                    prompt=prompt,
-                    response_model=IncrementalReviewResult,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
-                
-                if not result:
-                    raise Exception("❌ Incremental review not generated.")
-                
-                review_dict = result.model_dump(by_alias=True)
-                pr.update(
-                    review_dict=review_dict,
-                    comment_generated=True,
-                    comment_posted=False,
-                    review_type="incremental"
-                )
-                print(f"✅ PR #{pr.get('pr_number')} incremental review generated (model={model_name}).")
+                    pr, previous_review=pr.get("previous_review_text"), additional_context=additional_context)
+                result = waveassist.call_llm(model=model_name, prompt=prompt,
+                                             response_model=IncrementalReviewResult,
+                                             should_retry=True, max_tokens=MAX_TOKENS)
             else:
                 prompt = get_full_review_prompt(pr, additional_context=additional_context)
-                result = waveassist.call_llm(
-                    model=model_name,
-                    prompt=prompt,
-                    response_model=PRReviewResult,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
+                result = waveassist.call_llm(model=model_name, prompt=prompt,
+                                             response_model=ReviewResult,
+                                             should_retry=True, max_tokens=MAX_TOKENS)
 
-                if not result:
-                    raise Exception("❌ Review not generated.")
+            if not result:
+                raise Exception("Review not generated.")
 
-                review_dict = result.model_dump(by_alias=True)
-                pr.update(
-                    review_dict=review_dict,
-                    comment_generated=True,
-                    comment_posted=False,
-                    review_type="full"
-                )
-                print(f"✅ PR #{pr.get('pr_number')} full review generated (model={model_name}).")
-                
+            review_dict = result.model_dump()
+            diff_lines = build_diff_lines(pr.get("files"))
+            raw = (review_dict.get("findings") or []) + security_sweep(pr.get("files"), pr.get("brain_profile"))
+            kept, verdict, _ = apply_gate(raw, diff_lines, seen_sigs=set(),
+                                          severity_threshold=severity_threshold)
+            review_dict["findings"] = kept
+            review_dict["verdict"] = verdict
+
+            pr.update(review_dict=review_dict, comment_generated=True,
+                      comment_posted=False, review_type=review_type)
+            print(f"✅ PR #{pr.get('pr_number')} {review_type} review generated "
+                  f"(model={model_name}, verdict={verdict}, findings={len(kept)}).")
         except Exception as e:
             print(f"❌ PR #{pr.get('pr_number')} failed: {e}")
             pr.update(review_dict={}, comment_generated=False, comment_posted=False)
 
-    waveassist.store_data("pull_requests", prs)
+    waveassist.store_data("pull_requests", prs, data_type="json")
     print("All PR reviews processed and stored.")
