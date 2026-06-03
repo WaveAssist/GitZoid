@@ -1,0 +1,160 @@
+"""
+Unit tests for study_repos.py (the per-repo "brain" builder).
+"""
+import pytest
+import sys
+import os
+from unittest.mock import Mock, patch
+from datetime import datetime, timezone, timedelta
+
+# Add parent directory to path to import modules
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+from study_repos import (
+    select_canonical_branch,
+    list_branches,
+    needs_rebuild,
+    pick_key_files,
+    render_brain_html,
+    _sanitize_profile,
+    store_profile,
+    get_branch_tree,
+    RepoContextProfileV1,
+)
+
+
+def _resp(status=200, json_data=None, links=None):
+    r = Mock()
+    r.status_code = status
+    r.json.return_value = json_data if json_data is not None else {}
+    r.links = links or {}
+    return r
+
+
+class TestBranchSelection:
+    @patch('study_repos.requests.get')
+    def test_override_wins(self, mock_get):
+        mock_get.return_value = _resp(200, [
+            {"name": "main", "commit": {"sha": "s1"}},
+            {"name": "dev", "commit": {"sha": "s2"}},
+        ])
+        c = select_canonical_branch("o/r", {}, override="dev")
+        assert c["branch"] == "dev"
+        assert c["source"] == "override"
+        assert c["sha"] == "s2"
+
+    @patch('study_repos.requests.get')
+    @patch('study_repos.get_default_branch')
+    @patch('study_repos.branch_tip_date')
+    def test_defaults_to_default(self, mock_tip, mock_default, mock_get):
+        mock_get.return_value = _resp(200, [{"name": "main", "commit": {"sha": "s1"}}])
+        mock_default.return_value = "main"
+        mock_tip.return_value = "2026-06-01T00:00:00Z"
+        c = select_canonical_branch("o/r", {})
+        assert c["source"] == "default"
+        assert c["branch"] == "main"
+
+    @patch('study_repos.requests.get')
+    def test_list_branches_paginates(self, mock_get):
+        p1 = _resp(200,
+                   [{"name": f"b{i}", "commit": {"sha": f"s{i}"}} for i in range(100)],
+                   links={"next": {"url": "p2"}})
+        p2 = _resp(200, [{"name": "b100", "commit": {"sha": "s100"}}], links={})
+        mock_get.side_effect = [p1, p2]
+        assert len(list_branches("o/r", {})) == 101
+
+
+class TestStalenessGate:
+    def test_missing_rebuilds(self):
+        assert needs_rebuild({}, "abc") is True
+
+    def test_moved_sha_rebuilds(self):
+        existing = {"schema_version": "repo_context_profile_v1",
+                    "_fingerprint": {"sha": "x", "built_at": datetime.now(timezone.utc).isoformat()}}
+        assert needs_rebuild(existing, "y") is True
+
+    def test_old_schema_rebuilds(self):
+        assert needs_rebuild({"summary": "old proto-brain shape"}, "abc") is True
+
+    def test_fresh_skips(self):
+        existing = {"schema_version": "repo_context_profile_v1",
+                    "_fingerprint": {"sha": "abc", "built_at": datetime.now(timezone.utc).isoformat()}}
+        assert needs_rebuild(existing, "abc") is False
+
+    def test_ttl_expired_rebuilds(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        existing = {"schema_version": "repo_context_profile_v1",
+                    "_fingerprint": {"sha": "abc", "built_at": old}}
+        assert needs_rebuild(existing, "abc") is True
+
+
+class TestKeyFilePicker:
+    def test_prefers_auth_skips_vendor_and_tests(self):
+        out = pick_key_files([
+            "src/auth/login.py",
+            "tests/test_auth.py",
+            "node_modules/x/route.js",
+            "src/router.py",
+            "README.md",
+        ])
+        assert "src/auth/login.py" in out
+        assert all("test" not in f and "node_modules" not in f for f in out)
+
+
+class TestTreeTruncation:
+    @patch('study_repos.requests.get')
+    def test_truncated_flag_returned(self, mock_get):
+        mock_get.return_value = _resp(200, {"tree": [{"type": "blob", "path": "a.py"}], "truncated": True})
+        paths, truncated = get_branch_tree("o/r", "main", {})
+        assert truncated is True
+        assert "a.py" in paths
+
+
+class TestSanitizer:
+    def test_none_lists_coerced(self):
+        p = _sanitize_profile({"schema_version": "repo_context_profile_v1",
+                               "conventions": None, "security": None})
+        assert p["conventions"] == []
+        assert p["security"]["routes"] == []
+        assert p["security"]["secret_locations"] == []
+
+
+class TestBrainHtml:
+    def test_renders_and_flags_public(self):
+        prof = {"schema_version": "repo_context_profile_v1",
+                "architecture_summary": "A Flask API.",
+                "conventions": ["snake_case"],
+                "dependencies": [{"name": "pyjwt", "in_auth_path": True}],
+                "security": {"routes": [{"route": "POST /login", "unauthenticated": True}],
+                             "secret_locations": [".env"]},
+                "_fingerprint": {"sha": "abc123def4", "branch": "main",
+                                 "built_at": "2026-06-01T00:00:00+00:00"}}
+        h = render_brain_html({"o/r": prof})
+        assert "o/r" in h
+        assert "PUBLIC" in h
+        assert "#1ED66C" in h
+
+    def test_ignores_old_schema(self):
+        assert "No profiles yet." in render_brain_html({"o/r": {"summary": "old"}})
+
+
+class TestProfileModel:
+    def test_full_payload_validates(self):
+        m = RepoContextProfileV1.model_validate({
+            "schema_version": "repo_context_profile_v1",
+            "architecture_summary": "x",
+            "conventions": [],
+            "dependencies": [],
+            "security": {"routes": [], "secret_locations": []},
+            "review_focus": [],
+        })
+        assert m.schema_version == "repo_context_profile_v1"
+
+
+class TestAtomicWrite:
+    def test_store_profile_per_repo_key(self):
+        wa = Mock()
+        store_profile(wa, "o/r", {"schema_version": "repo_context_profile_v1"})
+        args, kwargs = wa.store_data.call_args
+        assert args[0] == "profile:o/r"
+        assert kwargs.get("data_type") == "json"
