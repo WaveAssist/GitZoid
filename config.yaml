@@ -6,6 +6,15 @@ output_default_message: "Run completed, no new pull requests to review. \n<br> G
 requirements:
   - openai
 
+# The "brain": study_repos builds a durable per-repo profile (additive key profile:{owner/repo}),
+# rendered to brain_html for a Knowledge tab. Refresh re-runs build_node; delete clears profile keys.
+brain:
+  enabled: true
+  html_key: brain_html
+  build_node: study_repos
+  profile_key_prefix: "profile:"
+  refresh_interval_days: 14
+
 nodes:
   - key: fetch_pull_requests
     name: FetchPRs
@@ -28,6 +37,15 @@ nodes:
     run_after:
       - generate_review
 
+  # Independent starting node with its own weekly schedule. Builds/refreshes the per-repo brain,
+  # decoupled from the 2-min review loop; downstream nodes read profiles with safe defaults.
+  - key: study_repos
+    name: StudyRepos
+    file_name: study_repos.py
+    starting_node: true
+    schedule:
+      cron: "0 3 * * 1"
+
 variables:
   - type: github
     name: github
@@ -43,7 +61,7 @@ variables:
         display_name: Model
         type: select
         is_optional: false
-        default_value: "anthropic/claude-haiku-4.5"
+        default_value: "anthropic/claude-sonnet-4.6"
         options:
           - name: Claude Haiku 4.5
             key: anthropic/claude-haiku-4.5
@@ -69,6 +87,23 @@ variables:
         is_optional: true
         default_value: ""
         helper_message: "Review context specific to this repo"
+      - key: branch
+        display_name: Branch to study
+        type: text
+        is_optional: true
+        default_value: ""
+        helper_message: "Branch the brain profiles (defaults to the repo's default branch)"
+      - key: severity_threshold
+        display_name: Review strictness
+        type: select
+        is_optional: true
+        default_value: "high"
+        options:
+          - name: High signal only (recommended)
+            key: high
+          - name: Balanced
+            key: medium
+        helper_message: "Only post review findings at or above this confidence/severity"
 
   - name: schedule
     key: schedule
