@@ -5,6 +5,18 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, MagicMock
 
+# --- Test isolation: neutralise the WaveAssist SDK's network I/O at import time ---
+# Each node is a flat script that runs its driver at module top level (no __main__ guard),
+# so importing one would otherwise make real, un-timed-out API calls (slow + non-hermetic).
+# Patch the SDK's I/O to offline defaults BEFORE any node module is imported, so unit tests
+# stay fast and hermetic. Per-test patches of a node's own `waveassist` reference still win.
+import waveassist as _wa  # noqa: E402
+_wa.init = lambda *a, **k: None
+_wa.fetch_data = lambda key=None, default=None, **k: default
+_wa.store_data = lambda *a, **k: True
+_wa.check_credits_and_notify = lambda *a, **k: True
+_wa.call_llm = lambda *a, **k: None
+
 
 @pytest.fixture
 def sample_pr_data():
