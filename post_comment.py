@@ -142,7 +142,8 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short):
     opts = review.get("potential_optimizations") or []
     nits = review.get("suggestions") or []
 
-    lines = [SUMMARY_MARKER, "", _verdict_line(verdict, len(open_f), len(opts), len(nits)), ""]
+    # NOTE: the SUMMARY_MARKER is added by create_/edit_summary_comment at post time, not here.
+    lines = [_verdict_line(verdict, len(open_f), len(opts), len(nits)), ""]
     for s in (review.get("summary") or review.get("changes_summary") or [])[:2]:
         lines.append(s)
     lines.append("")

@@ -63,7 +63,7 @@ class TestBuildSummaryMd:
                    "severity": "high", "status": "open"},
         }
         md = build_summary_md(review, ledger, ["a.py", "b.py"], "abc1234")
-        assert SUMMARY_MARKER in md
+        assert SUMMARY_MARKER not in md      # marker is added at post time, not by the body builder
         assert "⚠️ **Needs changes** — 2 to fix, 1 optional improvement, 1 nit" in md
         assert "### Findings (2)" in md
         assert "🐛" in md and "_high_" in md            # category icon + severity in the row
