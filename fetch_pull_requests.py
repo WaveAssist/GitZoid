@@ -18,22 +18,31 @@ if not success:
     raise Exception("Credits were not available, the run was skipped.")
 
 
+def _has_next_page(resp) -> bool:
+    """Defensive Link-header 'next' check. A non-dict .links (e.g. a bare test Mock) means
+    'no next page', so legacy single-response mocks stay single-page instead of looping forever."""
+    links = getattr(resp, "links", None)
+    return isinstance(links, dict) and "next" in links
+
+
 def fetch_compare_diff(repo_path: str, base_sha: str, head_sha: str, headers: dict) -> list:
     """
-    Fetch only the changed files between two commits using GitHub Compare API.
+    Fetch the changed files between two commits using the GitHub Compare API (paginated).
     GET /repos/{owner}/{repo}/compare/{base_sha}...{head_sha}
     """
     url = f"https://api.github.com/repos/{repo_path}/compare/{base_sha}...{head_sha}"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"⚠️ Failed to fetch compare diff: {response.status_code}")
-        return []
-    
-    try:
-        compare_data = response.json()
-        files = compare_data.get("files", [])
-        processed_files = []
-        for f in files:
+    processed_files, page = [], 1
+    while True:
+        response = requests.get(url, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch compare diff: {response.status_code}")
+            return processed_files
+        try:
+            compare_data = response.json()
+        except Exception as e:
+            print(f"❌ Failed to parse compare response: {e}")
+            return processed_files
+        for f in (compare_data.get("files", []) or []):
             if "filename" in f:
                 processed_files.append({
                     "filename": f["filename"],
@@ -42,23 +51,28 @@ def fetch_compare_diff(repo_path: str, base_sha: str, head_sha: str, headers: di
                     "additions": f.get("additions", 0),
                     "deletions": f.get("deletions", 0),
                 })
-        return processed_files
-    except Exception as e:
-        print(f"❌ Failed to parse compare response: {e}")
-        return []
+        if not _has_next_page(response):
+            break
+        page += 1
+    return processed_files
 
 
 def fetch_pr_files(repo_path: str, pr_number: int, headers: dict) -> list:
-    """Fetch all changed files for a PR (full diff)."""
+    """Fetch all changed files for a PR (full diff, paginated)."""
     files_url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}/files"
-    files_response = requests.get(files_url, headers=headers)
-    if files_response.status_code != 200:
-        print(f"⚠️ Failed to fetch files for PR #{pr_number}")
-        return []
-    
-    try:
-        files_changed = files_response.json()
-        processed_files = []
+    processed_files, page = [], 1
+    while True:
+        resp = requests.get(files_url, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+        if resp.status_code != 200:
+            print(f"⚠️ Failed to fetch files for PR #{pr_number}")
+            return processed_files
+        try:
+            files_changed = resp.json()
+        except Exception as e:
+            print(f"❌ Invalid files JSON for PR #{pr_number}: {e}")
+            return processed_files
+        if not files_changed:
+            break
         for f in files_changed:
             if "filename" in f:
                 processed_files.append({
@@ -68,10 +82,10 @@ def fetch_pr_files(repo_path: str, pr_number: int, headers: dict) -> list:
                     "additions": f.get("additions", 0),
                     "deletions": f.get("deletions", 0),
                 })
-        return processed_files
-    except Exception as e:
-        print(f"❌ Invalid files JSON for PR #{pr_number}: {e}")
-        return []
+        if not _has_next_page(resp):
+            break
+        page += 1
+    return processed_files
 
 
 def is_first_run_for_repo(repo_path: str, reviewed_prs: dict) -> bool:
@@ -111,8 +125,13 @@ def is_bot_pr(pr: dict) -> bool:
     ]
     if login in common_bots:
         return True
-    
+
     return False
+
+
+def is_draft_pr(pr: dict) -> bool:
+    """Check if a PR is a draft (drafts re-enter review naturally when marked ready)."""
+    return bool(pr.get("draft"))
 
 
 def is_old_pr(pr: dict, days: int = 30) -> bool:
@@ -134,7 +153,8 @@ def build_pr_data(
     current_sha: str,
     repo_path: str,
     previous_sha: str = None,
-    previous_review_text: str = None
+    previous_review_text: str = None,
+    brain_profile: dict = None
 ) -> dict:
     """Build PR data dictionary for review."""
     pr_data = {
@@ -151,6 +171,8 @@ def build_pr_data(
         pr_data["previous_sha"] = previous_sha
     if previous_review_text:
         pr_data["previous_review_text"] = previous_review_text
+    if brain_profile:
+        pr_data["brain_profile"] = brain_profile
     return pr_data
 
 
@@ -168,7 +190,10 @@ def fetch_and_process_prs(
         "Authorization": f"token {access_token}",
         "Accept": "application/vnd.github+json",
     }
-    
+
+    # Load the per-repo brain profile (additive key); attached to each PR for downstream review.
+    brain_profile = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
+
     # Detect first run
     is_first_run = is_first_run_for_repo(repo_path, reviewed_prs)
     
@@ -180,16 +205,24 @@ def fetch_and_process_prs(
         "direction": "desc",
         "per_page": 100,  # Get all open PRs
     }
-    response = requests.get(prs_url, headers=headers, params=params)
-    if response.status_code != 200:
-        print(f"❌ Failed to fetch PRs for {repo_path}: {response.status_code}")
-        return [], False
-    
-    try:
-        open_prs = response.json()
-    except Exception as e:
-        print(f"❌ Invalid PR JSON response: {e}")
-        return [], False
+    open_prs = []
+    params["page"] = 1
+    while True:
+        response = requests.get(prs_url, headers=headers, params=params, timeout=30)
+        if response.status_code != 200:
+            print(f"❌ Failed to fetch PRs for {repo_path}: {response.status_code}")
+            return [], False
+        try:
+            page_prs = response.json()
+        except Exception as e:
+            print(f"❌ Invalid PR JSON response: {e}")
+            return [], False
+        if not page_prs:
+            break
+        open_prs.extend(page_prs)
+        if not _has_next_page(response):
+            break
+        params["page"] += 1
     
     # Build lookup
     open_pr_numbers = {pr["number"] for pr in open_prs}
@@ -205,7 +238,11 @@ def fetch_and_process_prs(
             # Skip bot PRs
             if is_bot_pr(pr):
                 continue
-            
+
+            # Skip draft PRs (they re-enter naturally when marked ready for review)
+            if is_draft_pr(pr):
+                continue
+
             # Skip old PRs (>60 days)
             if is_old_pr(pr, days=60):
                 continue
@@ -221,7 +258,8 @@ def fetch_and_process_prs(
                     processed_files = fetch_pr_files(repo_path, pr_number, headers)
                     if processed_files:
                         pr_data = build_pr_data(
-                            pr, processed_files, "full", head_sha, repo_path
+                            pr, processed_files, "full", head_sha, repo_path,
+                            brain_profile=brain_profile
                         )
                         prs_to_review.append(pr_data)
                         processed_count += 1
@@ -251,7 +289,8 @@ def fetch_and_process_prs(
                             
                             if new_files:
                                 pr_data = build_pr_data(
-                                    pr, new_files, "incremental", head_sha, repo_path, stored_sha, previous_review_text
+                                    pr, new_files, "incremental", head_sha, repo_path, stored_sha,
+                                    previous_review_text, brain_profile=brain_profile
                                 )
                                 prs_to_review.append(pr_data)
                 else:
@@ -259,7 +298,8 @@ def fetch_and_process_prs(
                     processed_files = fetch_pr_files(repo_path, pr_number, headers)
                     if processed_files:
                         pr_data = build_pr_data(
-                            pr, processed_files, "full", head_sha, repo_path
+                            pr, processed_files, "full", head_sha, repo_path,
+                            brain_profile=brain_profile
                         )
                         prs_to_review.append(pr_data)
         except Exception as e:

@@ -16,9 +16,18 @@ from fetch_pull_requests import (
     is_first_run_for_repo,
     is_bot_pr,
     is_old_pr,
+    is_draft_pr,
     build_pr_data,
     fetch_and_process_prs
 )
+
+
+def _paged(status=200, json_data=None, has_next=False):
+    r = Mock()
+    r.status_code = status
+    r.json.return_value = json_data if json_data is not None else {}
+    r.links = {"next": {"url": "p2"}} if has_next else {}
+    return r
 
 
 class TestFetchCompareDiff:
@@ -571,13 +580,65 @@ class TestFetchAndProcessPRs:
         mock_response.status_code = 200
         mock_response.json.side_effect = ValueError("Invalid JSON")
         mock_get.return_value = mock_response
-        
+
         repo_metadata = {"id": "owner/repo"}
         access_token = "fake_token"
         reviewed_prs = {}
-        
+
         prs, changed = fetch_and_process_prs(repo_metadata, access_token, reviewed_prs)
-        
+
         assert len(prs) == 0
         assert changed == False
+
+
+class TestIsDraftPR:
+    def test_draft_true(self):
+        assert is_draft_pr({"draft": True}) is True
+
+    def test_draft_false(self):
+        assert is_draft_pr({"draft": False}) is False
+
+    def test_draft_missing(self):
+        assert is_draft_pr({}) is False
+
+
+class TestPagination:
+    @patch('fetch_pull_requests.requests.get')
+    def test_fetch_pr_files_paginates(self, mock_get):
+        page1 = _paged(200, [{"filename": f"f{i}.py", "patch": "p", "additions": 1, "deletions": 0}
+                             for i in range(100)], has_next=True)
+        page2 = _paged(200, [{"filename": "f100.py", "patch": "p", "additions": 1, "deletions": 0}])
+        mock_get.side_effect = [page1, page2]
+        result = fetch_pr_files("owner/repo", 1, {})
+        assert len(result) == 101
+        assert mock_get.call_count == 2
+
+    @patch('fetch_pull_requests.requests.get')
+    def test_fetch_compare_diff_paginates(self, mock_get):
+        page1 = _paged(200, {"files": [{"filename": f"f{i}.py", "patch": "p"} for i in range(100)]},
+                       has_next=True)
+        page2 = _paged(200, {"files": [{"filename": "f100.py", "patch": "p"}]})
+        mock_get.side_effect = [page1, page2]
+        result = fetch_compare_diff("owner/repo", "b", "h", {})
+        assert len(result) == 101
+        assert mock_get.call_count == 2
+
+    @patch('fetch_pull_requests.requests.get')
+    def test_single_page_when_no_next(self, mock_get):
+        # a Mock response without a dict .links must NOT loop forever (defensive _has_next_page)
+        mock_get.return_value = _paged(200, [{"filename": "a.py", "patch": "p"}])
+        result = fetch_pr_files("owner/repo", 1, {})
+        assert len(result) == 1
+        assert mock_get.call_count == 1
+
+
+class TestBuildPRDataBrainProfile:
+    def test_attaches_brain_profile(self, sample_pr_data, sample_pr_files):
+        prof = {"architecture_summary": "x", "conventions": ["c"]}
+        r = build_pr_data(sample_pr_data, sample_pr_files, "full", "abc", "owner/repo", brain_profile=prof)
+        assert r["brain_profile"] == prof
+
+    def test_no_brain_profile_key_when_absent(self, sample_pr_data, sample_pr_files):
+        r = build_pr_data(sample_pr_data, sample_pr_files, "full", "abc", "owner/repo")
+        assert "brain_profile" not in r
 
