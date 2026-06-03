@@ -32,6 +32,9 @@ TREE_BLOB_CAP = 800
 FILE_CHAR_CAP = 10000
 MAX_ACTIVE_BRANCH_SCAN = 10          # cap branch date lookups (rate-limit care)
 BRAND = "#1ED66C"
+# The brain is rare (weekly) + quality-critical, so it uses a strong model decoupled from the
+# cheaper per-PR review model. Optional override via the "brain_model" data key.
+BRAIN_MODEL = "anthropic/claude-sonnet-4.6"
 
 KEY_FILE_HINTS = ("auth", "login", "session", "security", "middleware",
                   "route", "router", "api", "settings", "config", "server", "app")
@@ -417,7 +420,7 @@ def needs_rebuild(existing, chosen_sha):
 
 repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
 access_token = waveassist.fetch_data("github_access_token", default="") or ""
-model_name = waveassist.fetch_data("model_name", default="anthropic/claude-sonnet-4.6")
+model_name = waveassist.fetch_data("brain_model", default=BRAIN_MODEL)
 headers = {"Authorization": f"token {access_token}", "Accept": "application/vnd.github+json"}
 
 repo_paths = []
