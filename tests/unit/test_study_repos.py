@@ -19,6 +19,7 @@ from study_repos import (
     _sanitize_profile,
     store_profile,
     get_branch_tree,
+    call_llm_with_retry,
     RepoContextProfileV1,
 )
 
@@ -158,3 +159,26 @@ class TestAtomicWrite:
         args, kwargs = wa.store_data.call_args
         assert args[0] == "profile:o/r"
         assert kwargs.get("data_type") == "json"
+
+
+class TestCallLlmRetry:
+    def test_succeeds_first_try(self):
+        with patch('study_repos.waveassist.call_llm') as m:
+            m.return_value = "RESULT"
+            out = call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=3, sleep_s=0)
+            assert out == "RESULT"
+            assert m.call_count == 1
+
+    def test_retries_then_succeeds(self):
+        with patch('study_repos.waveassist.call_llm') as m:
+            m.side_effect = [RuntimeError("transient"), "RESULT"]
+            out = call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=3, sleep_s=0)
+            assert out == "RESULT"
+            assert m.call_count == 2
+
+    def test_raises_after_exhausting(self):
+        with patch('study_repos.waveassist.call_llm') as m:
+            m.side_effect = RuntimeError("down")
+            with pytest.raises(RuntimeError):
+                call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=2, sleep_s=0)
+            assert m.call_count == 2

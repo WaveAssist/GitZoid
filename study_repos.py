@@ -250,6 +250,22 @@ secret locations, the auth/route surface, and per-repo review focus areas.
 </repo_files>"""
 
 
+def call_llm_with_retry(model, prompt, response_model, attempts=2, sleep_s=2):
+    """call_llm with retries; the LLM path (local Claude / OpenRouter) can fail transiently
+    (network, cold CLI). attempts>=1; re-raises the last error if every attempt fails."""
+    last = None
+    for i in range(attempts):
+        try:
+            return waveassist.call_llm(model=model, prompt=prompt,
+                                       response_model=response_model, should_retry=True)
+        except Exception as e:
+            last = e
+            print(f"⚠️ call_llm attempt {i + 1}/{attempts} failed: {e}")
+            if i < attempts - 1 and sleep_s:
+                time.sleep(sleep_s)
+    raise last
+
+
 def _sanitize_profile(p):
     """soft_parse can null-fill omitted required fields; coerce to safe shapes."""
     p = dict(p or {})
@@ -358,39 +374,42 @@ for repo in repositories:
     repo_paths.append(repo_path)
     override = (repo.get("properties", {}) or {}).get("branch", "") if isinstance(repo, dict) else ""
 
-    chosen = select_canonical_branch(repo_path, headers, override=override)
-    if not chosen.get("sha"):
-        print(f"⚠️ no canonical branch for {repo_path}; skipping")
+    try:
+        chosen = select_canonical_branch(repo_path, headers, override=override)
+        if not chosen.get("sha"):
+            print(f"⚠️ no canonical branch for {repo_path}; skipping")
+            continue
+
+        existing = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
+        if not needs_rebuild(existing, chosen["sha"]):
+            print(f"✓ {repo_path} profile fresh ({chosen['sha'][:8]}); skip")
+            continue
+
+        file_list, truncated = get_branch_tree(repo_path, chosen["branch"], headers)
+        readme = find_and_fetch(repo_path, file_list, README_PATTERNS, chosen["branch"], headers)
+        manifests = find_and_fetch(repo_path, file_list, MANIFEST_PATTERNS, chosen["branch"], headers)
+        key_paths = pick_key_files(file_list)
+        key_files = {p: get_file_content(repo_path, p, chosen["branch"], headers) for p in key_paths}
+        key_files = {p: c for p, c in key_files.items() if c}
+
+        profile = call_llm_with_retry(
+            model_name,
+            build_brain_prompt(repo_path, chosen["branch"], readme, manifests, key_files, file_list),
+            RepoContextProfileV1, attempts=3)
+        profile_dict = _sanitize_profile(profile.model_dump())
+        profile_dict["_fingerprint"] = {"sha": chosen["sha"], "branch": chosen["branch"],
+                                        "built_at": datetime.now(timezone.utc).isoformat(),
+                                        "tree_truncated": truncated}
+        if chosen.get("suggestion"):
+            profile_dict["_branch_suggestion"] = chosen["suggestion"]
+        store_profile(waveassist, repo_path, profile_dict)
+        repo_groups[repo_path] = {"branch": chosen["branch"],
+                                  "built_at": profile_dict["_fingerprint"]["built_at"]}
+        print(f"✓ built profile for {repo_path}@{chosen['branch']}")
+    except Exception as e:
+        # Soft-fail per repo: a transient error on one repo must not sink the whole brain build.
+        print(f"⚠️ failed to build profile for {repo_path}: {e}; skipping")
         continue
-
-    existing = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
-    if not needs_rebuild(existing, chosen["sha"]):
-        print(f"✓ {repo_path} profile fresh ({chosen['sha'][:8]}); skip")
-        continue
-
-    file_list, truncated = get_branch_tree(repo_path, chosen["branch"], headers)
-    readme = find_and_fetch(repo_path, file_list, README_PATTERNS, chosen["branch"], headers)
-    manifests = find_and_fetch(repo_path, file_list, MANIFEST_PATTERNS, chosen["branch"], headers)
-    key_paths = pick_key_files(file_list)
-    key_files = {p: get_file_content(repo_path, p, chosen["branch"], headers) for p in key_paths}
-    key_files = {p: c for p, c in key_files.items() if c}
-
-    profile = waveassist.call_llm(
-        model=model_name,
-        prompt=build_brain_prompt(repo_path, chosen["branch"], readme, manifests, key_files, file_list),
-        response_model=RepoContextProfileV1,
-        should_retry=True,
-    )
-    profile_dict = _sanitize_profile(profile.model_dump())
-    profile_dict["_fingerprint"] = {"sha": chosen["sha"], "branch": chosen["branch"],
-                                    "built_at": datetime.now(timezone.utc).isoformat(),
-                                    "tree_truncated": truncated}
-    if chosen.get("suggestion"):
-        profile_dict["_branch_suggestion"] = chosen["suggestion"]
-    store_profile(waveassist, repo_path, profile_dict)
-    repo_groups[repo_path] = {"branch": chosen["branch"],
-                              "built_at": profile_dict["_fingerprint"]["built_at"]}
-    print(f"✓ built profile for {repo_path}@{chosen['branch']}")
 
 waveassist.store_data("repo_groups", repo_groups, data_type="json")
 all_profiles = {r: (waveassist.fetch_data(f"profile:{r}", default={}) or {}) for r in repo_paths}
