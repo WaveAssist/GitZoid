@@ -64,21 +64,24 @@ class TestBuildSummaryMd:
         }
         md = build_summary_md(review, ledger, ["a.py", "b.py"], "abc1234")
         assert SUMMARY_MARKER not in md      # marker is added at post time, not by the body builder
-        assert "⚠️ **Needs changes** — 2 to fix, 1 optional improvement, 1 nit" in md
-        assert "### Findings (2)" in md
-        assert "🐛" in md and "_high_" in md            # category icon + severity in the row
-        assert "does X" in md
+        assert "automated AI-generated review" in md            # intro line restored
+        assert "⚠️ **Needs changes** — 2 to fix, 1 optional improvement, 1 suggestion" in md
+        assert "## 📝 Summary" in md and "- does X" in md       # summary as bullets
+        assert "## ⚠️ Potential Issues (1)" in md               # non-security findings only
+        assert "🐛" in md and "_high_" in md                    # category icon + severity in the row
         assert "real bug" in md
-        assert "~~`b.py:2` — old issue~~ ✅" in md      # struck-through fixed
-        assert "🚀 Potential Optimizations (1)" in md
+        assert "~~`b.py:2` — old issue~~ ✅" in md              # struck-through fixed
+        assert "## 🚀 Potential Optimizations (1)" in md
         assert "batch the calls" in md
-        assert "🔒 Security (1)" in md and "live secret" in md
-        assert "rename foo" in md
+        assert "## 🔒 Security (1)" in md and "live secret" in md
+        assert "💡 Suggestions (1)" in md and "rename foo" in md
         assert "abc1234" in md
 
     def test_clean_pr_verdict(self):
         md = build_summary_md({"verdict": "looks_good", "summary": ["small change"]}, {}, [], "deadbee")
         assert "Looks good" in md
+        assert "## 📝 Summary" in md and "- small change" in md
+        assert "automated AI-generated review" in md
 
 
 class TestReconcileLedger:

@@ -24,6 +24,7 @@ VERDICT_HEAD = {
 }
 _CAT_ICON = {"bug": "🐛", "security": "🔒", "optimization": "🚀", "suggestion": "💡"}
 _CAT_NAME = {"bug": "Bug", "security": "Security", "optimization": "Optimization", "suggestion": "Suggestion"}
+INTRO = "_Here's an automated AI-generated review to support your development workflow._"
 
 OUTPUT_LINK_STYLE = ("color: #1b5e20; font-weight: 600; text-decoration: underline; text-underline-offset: 3px;")
 OUTPUT_URL_HINT_STYLE = "display: block; margin-top: 6px; font-size: 11px; color: #5a6c5d;"
@@ -53,7 +54,7 @@ def _finding_header(f):
     return f"**{label}** · {sev} severity" if sev in ("high", "medium", "low") else f"**{label}**"
 
 
-def _verdict_line(verdict, n_find, n_opt, n_nit):
+def _verdict_line(verdict, n_find, n_opt, n_sugg):
     """Informative one-liner with counts, e.g. '⚠️ Needs changes — 1 to fix, 2 optional improvements'."""
     head = VERDICT_HEAD.get(verdict, "💬 **Reviewed**")
     bits = []
@@ -61,8 +62,8 @@ def _verdict_line(verdict, n_find, n_opt, n_nit):
         bits.append(f"{n_find} to fix")
     if n_opt:
         bits.append(f"{n_opt} optional improvement" + ("s" if n_opt != 1 else ""))
-    if n_nit:
-        bits.append(f"{n_nit} nit" + ("s" if n_nit != 1 else ""))
+    if n_sugg:
+        bits.append(f"{n_sugg} suggestion" + ("s" if n_sugg != 1 else ""))
     return head + (" — " + ", ".join(bits) if bits else "")
 
 
@@ -137,36 +138,38 @@ def _finding_row(v, struck=False):
 
 def build_summary_md(review, findings_ledger, changed_files, sha_short):
     verdict = review.get("verdict", "minor_comments")
-    open_f = [v for v in findings_ledger.values() if v.get("status") == "open"]
-    fixed_f = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
+    open_all = [v for v in findings_ledger.values() if v.get("status") == "open"]
+    fixed_all = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
+    open_issues = [v for v in open_all if v.get("category") != "security"]
+    open_sec = [v for v in open_all if v.get("category") == "security"]
     opts = review.get("potential_optimizations") or []
-    nits = review.get("suggestions") or []
+    sugg = review.get("suggestions") or []
+    summary_pts = review.get("summary") or review.get("changes_summary") or []
 
     # NOTE: the SUMMARY_MARKER is added by create_/edit_summary_comment at post time, not here.
-    lines = [_verdict_line(verdict, len(open_f), len(opts), len(nits)), ""]
-    for s in (review.get("summary") or review.get("changes_summary") or [])[:2]:
-        lines.append(s)
-    lines.append("")
-    if open_f or fixed_f:
-        lines.append(f"### Findings ({len(open_f)})")
-        for v in open_f:
+    lines = [INTRO, "", _verdict_line(verdict, len(open_all), len(opts), len(sugg)), ""]
+    if summary_pts:
+        lines.append("## 📝 Summary")
+        lines += [f"- {s}" for s in summary_pts]
+        lines.append("")
+    if open_issues or fixed_all:
+        lines.append(f"## ⚠️ Potential Issues ({len(open_issues)})")
+        for v in open_issues:
             lines.append(_finding_row(v))
-        for v in fixed_f[:20]:
+        for v in fixed_all[:20]:
             lines.append(_finding_row(v, struck=True))
         lines.append("")
+    if open_sec:
+        lines.append(f"## 🔒 Security ({len(open_sec)})")
+        lines += [_finding_row(v) for v in open_sec]
+        lines.append("")
     if opts:
-        lines.append(f"### 🚀 Potential Optimizations ({len(opts)})")
+        lines.append(f"## 🚀 Potential Optimizations ({len(opts)})")
         lines += [f"- {o}" for o in opts]
         lines.append("")
-    security = [v for v in findings_ledger.values()
-                if v.get("category") == "security" and v.get("status") == "open"]
-    if security:
-        lines.append(f"### 🔒 Security ({len(security)})")
-        lines += [_finding_row(v) for v in security]
-        lines.append("")
-    if nits:
-        lines.append(f"<details><summary>💡 Nits &amp; suggestions ({len(nits)})</summary>\n")
-        lines += [f"- {n}" for n in nits[:5]]
+    if sugg:
+        lines.append(f"<details><summary>💡 Suggestions ({len(sugg)})</summary>\n")
+        lines += [f"- {s}" for s in sugg[:5]]
         lines.append("\n</details>")
         lines.append("")
     if changed_files:
