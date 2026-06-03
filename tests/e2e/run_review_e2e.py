@@ -22,6 +22,7 @@ if not os.environ.get("uid") or not os.environ.get("project_key"):
     sys.exit("ERROR: set uid=<...> and project_key=<...> in the environment.")
 
 TARGET = next((a for a in sys.argv[1:] if not a.startswith("--")), "WaveAssist/GitZoid")
+LIVE = "--live" in sys.argv   # --live actually POSTS to GitHub; default is preview-only
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import waveassist  # noqa: E402
@@ -67,9 +68,10 @@ _store["reviewed_prs"] = {}
 waveassist.call_llm = _local_call_llm
 waveassist.fetch_data = _fetch
 waveassist.store_data = _store_data
-waveassist.is_test_run = lambda: True   # post_comment -> preview, no GitHub writes
+waveassist.is_test_run = lambda: not LIVE   # default preview; --live actually posts to GitHub
 
-print(f"[review-e2e] target={TARGET}  model={os.environ['CLAUDE_CLI_MODEL']}  (preview-only, no writes)\n")
+print(f"[review-e2e] target={TARGET}  model={os.environ['CLAUDE_CLI_MODEL']}  "
+      f"mode={'LIVE-POST' if LIVE else 'preview-only'}\n")
 
 import fetch_pull_requests  # noqa: E402,F401
 pulls = _store.get("pull_requests", [])
@@ -96,10 +98,19 @@ for p in reviewed:
         print(f"        opt: {o}")
 
 import post_comment  # noqa: E402,F401
-print(f"\n[3/3] post_comment (preview) — summary that WOULD be posted:\n")
-disp = _store.get("display_output", {}).get("html_content", "")
 import re
-m = re.search(r"<pre[^>]*>(.*?)</pre>", disp, re.S)
 import html as _html
-print(_html.unescape(m.group(1)) if m else "(no preview captured)")
-print("\n[review-e2e] done — nothing was written to GitHub or the project.")
+disp = _store.get("display_output", {}).get("html_content", "")
+if LIVE:
+    urls = re.findall(r'href="([^"]+)"', disp)
+    print("\n[3/3] post_comment (LIVE) — posted to GitHub:")
+    for u in urls:
+        print("      ", _html.unescape(u))
+    if not urls:
+        print("      (no link captured — see output above)")
+    print("\n[review-e2e] done — review posted live (project state NOT mutated; reviewed_prs kept in-memory).")
+else:
+    print("\n[3/3] post_comment (preview) — summary that WOULD be posted:\n")
+    m = re.search(r"<pre[^>]*>(.*?)</pre>", disp, re.S)
+    print(_html.unescape(m.group(1)) if m else "(no preview captured)")
+    print("\n[review-e2e] done — nothing was written to GitHub or the project.")
