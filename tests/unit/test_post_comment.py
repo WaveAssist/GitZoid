@@ -2,331 +2,162 @@
 Unit tests for post_comment.py
 """
 import pytest
-from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime, timezone
+from unittest.mock import Mock, patch
 import sys
 import os
 
-# Add parent directory to path to import modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 from post_comment import (
-    format_array_to_markdown,
-    generate_full_comment,
-    generate_incremental_comment,
-    post_pr_comment,
-    update_reviewed_prs
+    finding_sig,
+    findings_to_inline_comments,
+    build_summary_md,
+    reconcile_ledger,
+    update_reviewed_prs,
+    create_pr_review,
+    create_summary_comment,
+    edit_summary_comment,
+    find_summary_comment_id,
+    SUMMARY_MARKER,
 )
 
 
-class TestFormatArrayToMarkdown:
-    """Tests for format_array_to_markdown function."""
-    
-    def test_format_array_to_markdown_basic(self):
-        """Test basic array to markdown conversion."""
-        items = ["Item 1", "Item 2", "Item 3"]
-        result = format_array_to_markdown(items)
-        
-        assert "- Item 1" in result
-        assert "- Item 2" in result
-        assert "- Item 3" in result
-        assert result.count("-") == 3
-    
-    def test_format_array_to_markdown_empty(self):
-        """Test handling empty array."""
-        result = format_array_to_markdown([])
-        assert result == ""
-    
-    def test_format_array_to_markdown_none(self):
-        """Test handling None input."""
-        result = format_array_to_markdown(None)
-        assert result == ""
-    
-    def test_format_array_to_markdown_single_item(self):
-        """Test single item conversion."""
-        result = format_array_to_markdown(["Single item"])
-        assert result == "- Single item"
-    
-    def test_format_array_to_markdown_special_characters(self):
-        """Test handling special markdown characters."""
-        items = ["Item with *asterisk*", "Item with _underscore_", "Item with `code`"]
-        result = format_array_to_markdown(items)
-        
-        # Should preserve special characters (not escaping, just formatting)
-        assert "*asterisk*" in result
-        assert "_underscore_" in result
-        assert "`code`" in result
+def _F(path="a.py", line=5, side="RIGHT", category="bug", severity="high", body="a bug"):
+    return {"path": path, "line": line, "side": side, "category": category,
+            "severity": severity, "body": body}
 
 
-class TestGenerateFullComment:
-    """Tests for generate_full_comment function."""
-    
-    def test_generate_full_comment_all_sections(self, sample_review_dict_full):
-        """Test generating comment with all sections."""
-        comment = generate_full_comment(sample_review_dict_full)
-        
-        assert "Summary" in comment
-        assert "Potential Issues" in comment
-        assert "Potential Optimizations" in comment
-        assert "Suggestions" in comment
-        assert "Gitzoid" in comment  # Footer
-        assert "automated AI-generated review" in comment  # Intro
-    
-    def test_generate_full_comment_missing_sections(self):
-        """Test generating comment with missing sections."""
-        review_dict = {
-            "summary": ["Summary point"],
-            "potential_issues": [],
-            "potential_optimizations": [],
-            "suggestions": []
+class TestFindingSig:
+    def test_stable_and_distinct(self):
+        assert finding_sig(_F()) == finding_sig(_F())
+        assert finding_sig(_F()) != finding_sig(_F(body="different"))
+
+
+class TestFindingsToInline:
+    def test_anchored_finding(self):
+        out = findings_to_inline_comments([_F()])
+        assert out == [{"path": "a.py", "line": 5, "side": "RIGHT", "body": "a bug"}]
+
+    def test_unanchored_skipped(self):
+        assert findings_to_inline_comments([_F(line=None)]) == []
+
+    def test_suggestion_block(self):
+        f = _F()
+        f["suggested_replacement"] = "x = 1"
+        out = findings_to_inline_comments([f])
+        assert "```suggestion\nx = 1\n```" in out[0]["body"]
+
+
+class TestBuildSummaryMd:
+    def test_renders_all_sections(self):
+        review = {"verdict": "needs_changes", "summary": ["does X"],
+                  "potential_optimizations": ["batch the calls"], "suggestions": ["rename foo"]}
+        ledger = {
+            "s1": {"path": "a.py", "line": 5, "body": "real bug", "category": "bug", "status": "open"},
+            "s2": {"path": "b.py", "line": 2, "body": "old issue", "category": "bug", "status": "fixed"},
+            "s3": {"path": "c.py", "line": 1, "body": "live secret", "category": "security", "status": "open"},
         }
-        comment = generate_full_comment(review_dict)
-        
-        assert "Summary" in comment
-        assert "Potential Issues" not in comment  # Empty section should be omitted
-        assert "Potential Optimizations" not in comment
-        assert "Suggestions" not in comment
-    
-    def test_generate_full_comment_only_summary(self):
-        """Test comment with only summary section."""
-        review_dict = {
-            "summary": ["Only summary"],
-            "potential_issues": [],
-            "potential_optimizations": [],
-            "suggestions": []
-        }
-        comment = generate_full_comment(review_dict)
-        
-        assert "Summary" in comment
-        assert "Only summary" in comment
-        assert "Potential Issues" not in comment
-    
-    def test_generate_full_comment_includes_footer(self, sample_review_dict_full):
-        """Test comment includes footer."""
-        comment = generate_full_comment(sample_review_dict_full)
-        
-        assert "Gitzoid" in comment
-        assert "waveassist.io" in comment or "gitzoid" in comment.lower()
-    
-    def test_generate_full_comment_includes_intro(self, sample_review_dict_full):
-        """Test comment includes intro."""
-        comment = generate_full_comment(sample_review_dict_full)
-        
-        # Intro has underscores, so check for the core text
-        assert "automated" in comment.lower() and "review" in comment.lower()
-    
-    def test_generate_full_comment_empty_dict(self):
-        """Test handling empty review dictionary."""
-        comment = generate_full_comment({})
-        
-        # Should still have intro and footer
-        assert "Gitzoid" in comment
-        assert "automated" in comment.lower() and "review" in comment.lower()
+        md = build_summary_md(review, ledger, ["a.py", "b.py"], "abc1234")
+        assert SUMMARY_MARKER in md
+        assert "Needs changes" in md
+        assert "does X" in md
+        assert "real bug" in md
+        assert "~~`b.py:2` — old issue~~ ✅" in md      # struck-through fixed
+        assert "🚀 Potential Optimizations" in md
+        assert "batch the calls" in md
+        assert "🔒 Security" in md and "live secret" in md
+        assert "rename foo" in md
+        assert "a.py" in md
+        assert "abc1234" in md
+
+    def test_clean_pr_verdict(self):
+        md = build_summary_md({"verdict": "looks_good", "summary": ["small change"]}, {}, [], "deadbee")
+        assert "Looks good" in md
 
 
-class TestGenerateIncrementalComment:
-    """Tests for generate_incremental_comment function."""
-    
-    def test_generate_incremental_comment_all_sections(self, sample_review_dict_incremental):
-        """Test generating incremental comment with all sections."""
-        comment = generate_incremental_comment(
-            sample_review_dict_incremental,
-            previous_sha="abc123def456",
-            current_sha="def456ghi789"
-        )
-        
-        assert "New commits detected" in comment
-        assert "Changes Summary" in comment
-        assert "Addressed Issues" in comment
-        assert "New Observations" in comment
-        assert "abc123" in comment  # First 7 chars of previous SHA
-        assert "def456" in comment  # First 7 chars of current SHA
-    
-    def test_generate_incremental_comment_missing_sections(self):
-        """Test incremental comment with missing sections."""
-        review_dict = {
-            "changes_summary": ["Changes"],
-            "addressed_issues": [],
-            "new_observations": []
-        }
-        comment = generate_incremental_comment(review_dict)
-        
-        assert "Changes Summary" in comment
-        assert "Addressed Issues" not in comment
-        assert "New Observations" not in comment
-    
-    def test_generate_incremental_comment_no_sha(self, sample_review_dict_incremental):
-        """Test incremental comment without SHA info."""
-        comment = generate_incremental_comment(sample_review_dict_incremental)
-        
-        assert "New commits detected" in comment
-    
-    def test_generate_incremental_comment_sha_formatting(self):
-        """Test SHA formatting in incremental comment."""
-        review_dict = {
-            "changes_summary": ["Changes"]
-        }
-        comment = generate_incremental_comment(
-            review_dict,
-            previous_sha="abc123def456",
-            current_sha="def456ghi789"
-        )
-        
-        # Should show first 7 characters
-        assert "abc123" in comment
-        assert "def456" in comment
-        assert "→" in comment or "to" in comment.lower()
-    
-    def test_generate_incremental_comment_includes_footer(self, sample_review_dict_incremental):
-        """Test incremental comment includes footer."""
-        comment = generate_incremental_comment(sample_review_dict_incremental)
-        
-        assert "Gitzoid" in comment
+class TestReconcileLedger:
+    def test_new_bug_open_and_inline(self):
+        ledger, inline = reconcile_ledger({}, [_F()], "sha1", is_update=False)
+        assert len(ledger) == 1
+        assert list(ledger.values())[0]["status"] == "open"
+        assert len(inline) == 1
+
+    def test_disappeared_marked_fixed(self):
+        f = _F()
+        prior = {finding_sig(f): {**f, "status": "open"}}
+        ledger, inline = reconcile_ledger(prior, [], "sha2", is_update=True)
+        assert list(ledger.values())[0]["status"] == "fixed"
+        assert inline == []
+
+    def test_new_nit_suppressed_on_update(self):
+        nit = _F(category="optimization", severity="low", body="nit")
+        ledger_upd, _ = reconcile_ledger({}, [nit], "sha", is_update=True)
+        assert ledger_upd == {}
+        ledger_first, _ = reconcile_ledger({}, [nit], "sha", is_update=False)
+        assert len(ledger_first) == 1
+
+    def test_survivor_keeps_first_seen(self):
+        f = _F()
+        sig = finding_sig(f)
+        prior = {sig: {**f, "status": "open", "first_seen_sha": "old"}}
+        ledger, _ = reconcile_ledger(prior, [f], "newsha", is_update=True)
+        assert ledger[sig]["first_seen_sha"] == "old"
+        assert ledger[sig]["last_seen_sha"] == "newsha"
 
 
-class TestPostPRComment:
-    """Tests for post_pr_comment function."""
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_success(self, mock_post):
-        """Test successfully posting comment."""
-        mock_response = Mock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {"id": 123, "body": "Test comment"}
-        mock_post.return_value = mock_response
-        
-        result = post_pr_comment("owner/repo", 1, "Test comment", "fake_token")
-        
-        assert result is not None
-        assert result["id"] == 123
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert "Bearer fake_token" in call_args[1]["headers"]["Authorization"]
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_api_error(self, mock_post):
-        """Test handling API errors."""
-        mock_response = Mock()
-        mock_response.status_code = 403
-        mock_response.json.return_value = {"message": "Forbidden"}
-        mock_post.return_value = mock_response
-        
-        result = post_pr_comment("owner/repo", 1, "Test comment", "fake_token")
-        
-        assert result is None
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_not_found(self, mock_post):
-        """Test handling 404 errors."""
-        mock_response = Mock()
-        mock_response.status_code = 404
-        mock_response.json.return_value = {"message": "Not Found"}
-        mock_post.return_value = mock_response
-        
-        result = post_pr_comment("owner/repo", 999, "Test comment", "fake_token")
-        
-        assert result is None
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_server_error(self, mock_post):
-        """Test handling server errors."""
-        mock_response = Mock()
-        mock_response.status_code = 500
-        mock_response.json.return_value = {"message": "Internal Server Error"}
-        mock_post.return_value = mock_response
-        
-        result = post_pr_comment("owner/repo", 1, "Test comment", "fake_token")
-        
-        assert result is None
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_correct_url(self, mock_post):
-        """Test correct API URL is used."""
-        mock_response = Mock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {"id": 123}
-        mock_post.return_value = mock_response
-        
-        post_pr_comment("owner/repo", 42, "Test comment", "fake_token")
-        
-        call_args = mock_post.call_args
-        assert "repos/owner/repo/issues/42/comments" in call_args[0][0]
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_correct_headers(self, mock_post):
-        """Test correct headers are sent."""
-        mock_response = Mock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {"id": 123}
-        mock_post.return_value = mock_response
-        
-        post_pr_comment("owner/repo", 1, "Test comment", "fake_token")
-        
-        call_args = mock_post.call_args
-        headers = call_args[1]["headers"]
-        assert headers["Authorization"] == "Bearer fake_token"
-        assert headers["Accept"] == "application/vnd.github+json"
-    
-    @patch('post_comment.requests.post')
-    def test_post_pr_comment_correct_body(self, mock_post):
-        """Test correct request body is sent."""
-        mock_response = Mock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {"id": 123}
-        mock_post.return_value = mock_response
-        
-        comment_body = "Test comment body"
-        post_pr_comment("owner/repo", 1, comment_body, "fake_token")
-        
-        call_args = mock_post.call_args
-        assert call_args[1]["json"]["body"] == comment_body
+class TestUpdateReviewedPrs:
+    def test_merges_preserving_existing(self):
+        reviewed = {"o/r#1": {"status": "reviewed", "last_reviewed_sha": "old", "keepme": "yes"}}
+        update_reviewed_prs(reviewed, "o/r", 1, "new", review_text="t",
+                            summary_comment_id=42, findings_ledger={"s": {}})
+        e = reviewed["o/r#1"]
+        assert e["last_reviewed_sha"] == "new"
+        assert e["summary_comment_id"] == 42
+        assert e["findings"] == {"s": {}}
+        assert e["keepme"] == "yes"       # merge, not replace
 
 
-class TestUpdateReviewedPRs:
-    """Tests for update_reviewed_prs function."""
-    
-    def test_update_reviewed_prs_basic(self):
-        """Test basic update of reviewed PRs tracker."""
-        reviewed_prs = {}
-        update_reviewed_prs(reviewed_prs, "owner/repo", 123, "abc123", "Review text")
-        
-        key = "owner/repo#123"
-        assert key in reviewed_prs
-        assert reviewed_prs[key]["status"] == "reviewed"
-        assert reviewed_prs[key]["last_reviewed_sha"] == "abc123"
-        assert reviewed_prs[key]["last_review_text"] == "Review text"
-        assert "reviewed_at" in reviewed_prs[key]
-    
-    def test_update_reviewed_prs_without_review_text(self):
-        """Test update without review text."""
-        reviewed_prs = {}
-        update_reviewed_prs(reviewed_prs, "owner/repo", 123, "abc123")
-        
-        key = "owner/repo#123"
-        assert key in reviewed_prs
-        assert "last_review_text" not in reviewed_prs[key]
-    
-    def test_update_reviewed_prs_overwrites_existing(self):
-        """Test update overwrites existing entry."""
-        reviewed_prs = {
-            "owner/repo#123": {
-                "status": "reviewed",
-                "last_reviewed_sha": "old123",
-                "reviewed_at": "2024-01-01T00:00:00Z"
-            }
-        }
-        update_reviewed_prs(reviewed_prs, "owner/repo", 123, "new456", "New review")
-        
-        assert reviewed_prs["owner/repo#123"]["last_reviewed_sha"] == "new456"
-        assert reviewed_prs["owner/repo#123"]["last_review_text"] == "New review"
-    
-    def test_update_reviewed_prs_timestamp_format(self):
-        """Test timestamp is in correct format."""
-        reviewed_prs = {}
-        update_reviewed_prs(reviewed_prs, "owner/repo", 123, "abc123")
-        
-        timestamp = reviewed_prs["owner/repo#123"]["reviewed_at"]
-        # Should be ISO format
-        assert "T" in timestamp
-        assert "Z" in timestamp or "+" in timestamp
+def _resp(status, json_data=None):
+    r = Mock()
+    r.status_code = status
+    r.json.return_value = json_data if json_data is not None else {}
+    r.text = ""
+    return r
 
+
+class TestRestSequences:
+    @patch('post_comment.requests.post')
+    def test_create_pr_review_success(self, mock_post):
+        mock_post.return_value = _resp(200, {"id": 7})
+        out = create_pr_review("o/r", 1, "sha", "", [{"path": "a.py", "line": 5, "body": "x"}], "tok")
+        assert out == {"id": 7}
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["event"] == "COMMENT" and payload["commit_id"] == "sha"
+
+    @patch('post_comment.requests.post')
+    def test_create_pr_review_failure(self, mock_post):
+        mock_post.return_value = _resp(422)
+        assert create_pr_review("o/r", 1, "sha", "", [], "tok") is None
+
+    @patch('post_comment.requests.post')
+    def test_create_summary_has_marker(self, mock_post):
+        mock_post.return_value = _resp(201, {"id": 9, "html_url": "u"})
+        out = create_summary_comment("o/r", 1, "the summary", "tok")
+        assert out["id"] == 9
+        assert SUMMARY_MARKER in mock_post.call_args.kwargs["json"]["body"]
+
+    @patch('post_comment.requests.patch')
+    def test_edit_summary(self, mock_patch):
+        mock_patch.return_value = _resp(200, {"id": 9})
+        assert edit_summary_comment("o/r", 9, "updated", "tok") == {"id": 9}
+
+    @patch('post_comment.requests.get')
+    def test_find_summary_by_marker(self, mock_get):
+        mock_get.return_value = _resp(200, [{"id": 1, "body": "hi"},
+                                            {"id": 2, "body": SUMMARY_MARKER + "\nsummary"}])
+        assert find_summary_comment_id("o/r", 1, "tok") == 2
+
+    @patch('post_comment.requests.get')
+    def test_find_summary_none(self, mock_get):
+        mock_get.return_value = _resp(200, [{"id": 1, "body": "no marker"}])
+        assert find_summary_comment_id("o/r", 1, "tok") is None
