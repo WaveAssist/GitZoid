@@ -17,11 +17,13 @@ from datetime import datetime, timezone
 waveassist.init(check_credits=True)
 
 SUMMARY_MARKER = "<!-- gitzoid:summary -->"
-VERDICT_LINE = {
-    "looks_good":     "✅ **Looks good** — no blocking issues found.",
-    "minor_comments": "💬 **Minor comments** — a few things to consider.",
-    "needs_changes":  "⚠️ **Needs changes** — please take a look at the issues below.",
+VERDICT_HEAD = {
+    "looks_good":     "✅ **Looks good**",
+    "minor_comments": "💬 **Minor comments**",
+    "needs_changes":  "⚠️ **Needs changes**",
 }
+_CAT_ICON = {"bug": "🐛", "security": "🔒", "optimization": "🚀", "suggestion": "💡"}
+_CAT_NAME = {"bug": "Bug", "security": "Security", "optimization": "Optimization", "suggestion": "Suggestion"}
 
 OUTPUT_LINK_STYLE = ("color: #1b5e20; font-weight: 600; text-decoration: underline; text-underline-offset: 3px;")
 OUTPUT_URL_HINT_STYLE = "display: block; margin-top: 6px; font-size: 11px; color: #5a6c5d;"
@@ -41,6 +43,27 @@ def finding_sig(f):
     raw = f"{f.get('category', '')}|{f.get('path', '')}|{f.get('line')}|{f.get('side', 'RIGHT')}|" \
           f"{' '.join((f.get('body') or '').lower().split())[:120]}"
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def _finding_header(f):
+    """A short label so a reader instantly knows what a finding IS."""
+    cat = f.get("category")
+    label = f"{_CAT_ICON.get(cat, '📌')} {_CAT_NAME.get(cat, 'Note')}"
+    sev = f.get("severity")
+    return f"**{label}** · {sev} severity" if sev in ("high", "medium", "low") else f"**{label}**"
+
+
+def _verdict_line(verdict, n_find, n_opt, n_nit):
+    """Informative one-liner with counts, e.g. '⚠️ Needs changes — 1 to fix, 2 optional improvements'."""
+    head = VERDICT_HEAD.get(verdict, "💬 **Reviewed**")
+    bits = []
+    if n_find:
+        bits.append(f"{n_find} to fix")
+    if n_opt:
+        bits.append(f"{n_opt} optional improvement" + ("s" if n_opt != 1 else ""))
+    if n_nit:
+        bits.append(f"{n_nit} nit" + ("s" if n_nit != 1 else ""))
+    return head + (" — " + ", ".join(bits) if bits else "")
 
 
 # ---------------------------------------------------------------- GitHub REST
@@ -93,7 +116,7 @@ def findings_to_inline_comments(findings):
     for f in (findings or []):
         if f.get("line") is None:            # unanchored → summary-only, never an inline comment
             continue
-        body = f.get("body", "")
+        body = _finding_header(f) + "\n\n" + f.get("body", "")
         if f.get("suggested_replacement"):
             body += f"\n\n```suggestion\n{f['suggested_replacement']}\n```"
         out.append({"path": f.get("path"), "line": f.get("line"), "side": f.get("side", "RIGHT"), "body": body})
@@ -102,40 +125,51 @@ def findings_to_inline_comments(findings):
 
 # ---------------------------------------------------------------- summary + ledger
 
+def _finding_row(v, struck=False):
+    icon = _CAT_ICON.get(v.get("category"), "•")
+    sev = v.get("severity")
+    sev_md = f" _{sev}_" if sev in ("high", "medium", "low") else ""
+    loc = f"`{v.get('path')}:{v.get('line')}`" if v.get("line") is not None else f"`{v.get('path')}`"
+    if struck:
+        return f"- {icon} ~~{loc} — {v.get('body')}~~ ✅"
+    return f"- {icon}{sev_md} {loc} — {v.get('body')}"
+
+
 def build_summary_md(review, findings_ledger, changed_files, sha_short):
     verdict = review.get("verdict", "minor_comments")
-    lines = [SUMMARY_MARKER, "", VERDICT_LINE.get(verdict, VERDICT_LINE["minor_comments"]), ""]
+    open_f = [v for v in findings_ledger.values() if v.get("status") == "open"]
+    fixed_f = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
+    opts = review.get("potential_optimizations") or []
+    nits = review.get("suggestions") or []
+
+    lines = [SUMMARY_MARKER, "", _verdict_line(verdict, len(open_f), len(opts), len(nits)), ""]
     for s in (review.get("summary") or review.get("changes_summary") or [])[:2]:
         lines.append(s)
     lines.append("")
-    open_f = [v for v in findings_ledger.values() if v.get("status") == "open"]
-    fixed_f = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
     if open_f or fixed_f:
-        lines.append("### Findings")
+        lines.append(f"### Findings ({len(open_f)})")
         for v in open_f:
-            lines.append(f"- `{v.get('path')}:{v.get('line')}` — {v.get('body')}")
+            lines.append(_finding_row(v))
         for v in fixed_f[:20]:
-            lines.append(f"- ~~`{v.get('path')}:{v.get('line')}` — {v.get('body')}~~ ✅")
+            lines.append(_finding_row(v, struck=True))
         lines.append("")
-    opts = review.get("potential_optimizations") or []
     if opts:
-        lines.append("### 🚀 Potential Optimizations")
+        lines.append(f"### 🚀 Potential Optimizations ({len(opts)})")
         lines += [f"- {o}" for o in opts]
         lines.append("")
     security = [v for v in findings_ledger.values()
                 if v.get("category") == "security" and v.get("status") == "open"]
     if security:
-        lines.append("### 🔒 Security")
-        lines += [f"- `{v.get('path')}:{v.get('line')}` — {v.get('body')}" for v in security]
+        lines.append(f"### 🔒 Security ({len(security)})")
+        lines += [_finding_row(v) for v in security]
         lines.append("")
-    nits = review.get("suggestions") or []
     if nits:
-        lines.append("<details><summary>💡 Nits & suggestions</summary>\n")
+        lines.append(f"<details><summary>💡 Nits &amp; suggestions ({len(nits)})</summary>\n")
         lines += [f"- {n}" for n in nits[:5]]
         lines.append("\n</details>")
         lines.append("")
     if changed_files:
-        lines.append("<details><summary>📁 Changed files</summary>\n")
+        lines.append(f"<details><summary>📁 Changed files ({len(changed_files)})</summary>\n")
         lines += [f"- `{p}`" for p in changed_files[:50]]
         lines.append("\n</details>")
         lines.append("")
@@ -220,7 +254,7 @@ if should_process:
         entry = reviewed_prs.get(f"{repo_path}#{pr_number}", {})
         prior_ledger = entry.get("findings", {})
         summary_comment_id = entry.get("summary_comment_id")
-        if summary_comment_id is None and entry and not preview:
+        if summary_comment_id is None and not preview:   # idempotent: reuse our marked comment, never duplicate
             summary_comment_id = find_summary_comment_id(repo_path, pr_number, access_token)
 
         gated = review_dict.get("findings", [])

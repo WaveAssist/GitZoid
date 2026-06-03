@@ -170,6 +170,17 @@ class TestApplyGate:
         assert len(kept) == 1
         assert verdict == "needs_changes"
 
+    def test_high_severity_blocks_even_at_medium_confidence(self):
+        kept, verdict, _ = apply_gate([_F(severity="high", confidence="medium")], self.DL)
+        assert len(kept) == 1
+        assert verdict == "needs_changes"
+
+    def test_medium_high_conf_is_minor_not_blocking(self):
+        kept, verdict, _ = apply_gate([_F(severity="medium", confidence="high")], self.DL,
+                                      severity_threshold="medium")
+        assert len(kept) == 1
+        assert verdict == "minor_comments"
+
     def test_drops_low_confidence_medium_bug(self):
         kept, verdict, _ = apply_gate([_F(severity="medium", confidence="low")], self.DL)
         assert kept == []

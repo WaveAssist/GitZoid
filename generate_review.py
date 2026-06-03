@@ -365,7 +365,7 @@ def apply_gate(findings, diff_lines, seen_sigs=None, severity_threshold="high"):
             continue
         kept.append(f)
         new_sigs.append(sig)
-        if cat in ("bug", "security") and sev in ("high", "medium") and conf == "high":
+        if cat in ("bug", "security") and sev == "high":   # any high-severity bug/security blocks
             blocking = True
     kept.sort(key=lambda f: (f["category"] != "security", _SEV_RANK[f["severity"]],
                              f.get("path") or "", f.get("line") or 0))

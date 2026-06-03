@@ -36,7 +36,10 @@ class TestFindingSig:
 class TestFindingsToInline:
     def test_anchored_finding(self):
         out = findings_to_inline_comments([_F()])
-        assert out == [{"path": "a.py", "line": 5, "side": "RIGHT", "body": "a bug"}]
+        assert len(out) == 1
+        c = out[0]
+        assert c["path"] == "a.py" and c["line"] == 5 and c["side"] == "RIGHT"
+        assert "🐛 Bug" in c["body"] and "high severity" in c["body"] and "a bug" in c["body"]
 
     def test_unanchored_skipped(self):
         assert findings_to_inline_comments([_F(line=None)]) == []
@@ -53,21 +56,24 @@ class TestBuildSummaryMd:
         review = {"verdict": "needs_changes", "summary": ["does X"],
                   "potential_optimizations": ["batch the calls"], "suggestions": ["rename foo"]}
         ledger = {
-            "s1": {"path": "a.py", "line": 5, "body": "real bug", "category": "bug", "status": "open"},
+            "s1": {"path": "a.py", "line": 5, "body": "real bug", "category": "bug",
+                   "severity": "high", "status": "open"},
             "s2": {"path": "b.py", "line": 2, "body": "old issue", "category": "bug", "status": "fixed"},
-            "s3": {"path": "c.py", "line": 1, "body": "live secret", "category": "security", "status": "open"},
+            "s3": {"path": "c.py", "line": 1, "body": "live secret", "category": "security",
+                   "severity": "high", "status": "open"},
         }
         md = build_summary_md(review, ledger, ["a.py", "b.py"], "abc1234")
         assert SUMMARY_MARKER in md
-        assert "Needs changes" in md
+        assert "⚠️ **Needs changes** — 2 to fix, 1 optional improvement, 1 nit" in md
+        assert "### Findings (2)" in md
+        assert "🐛" in md and "_high_" in md            # category icon + severity in the row
         assert "does X" in md
         assert "real bug" in md
         assert "~~`b.py:2` — old issue~~ ✅" in md      # struck-through fixed
-        assert "🚀 Potential Optimizations" in md
+        assert "🚀 Potential Optimizations (1)" in md
         assert "batch the calls" in md
-        assert "🔒 Security" in md and "live secret" in md
+        assert "🔒 Security (1)" in md and "live secret" in md
         assert "rename foo" in md
-        assert "a.py" in md
         assert "abc1234" in md
 
     def test_clean_pr_verdict(self):
