@@ -276,13 +276,15 @@ class TestBuildPRData:
             sample_pr_data,
             sample_pr_files,
             "full",
-            "abc123"
+            "abc123",
+            "owner/repo"
         )
-        
+
         assert result["pr_number"] == 123
         assert result["title"] == "Test Pull Request"
         assert result["review_type"] == "full"
         assert result["current_sha"] == "abc123"
+        assert result["id"] == "owner/repo"
         assert result["files"] == sample_pr_files
         assert "previous_sha" not in result
         assert "previous_review_text" not in result
@@ -294,10 +296,11 @@ class TestBuildPRData:
             sample_pr_files,
             "incremental",
             "new123",
+            "owner/repo",
             previous_sha="old123",
             previous_review_text="Previous review"
         )
-        
+
         assert result["review_type"] == "incremental"
         assert result["previous_sha"] == "old123"
         assert result["previous_review_text"] == "Previous review"
