@@ -2,7 +2,7 @@
 study_repos.py — GitZoid's per-repo "brain" builder (starting node, weekly schedule).
 
 For each connected repo it picks one canonical branch, fetches a small, security-relevant
-slice of the codebase, and distills a durable `repo_context_profile_v1` profile stored under
+slice of the codebase, and distills a durable `repo_context_profile_v2` profile stored under
 the additive key  profile:{owner/repo}.  Downstream nodes (fetch_pull_requests, generate_review)
 read that profile to make reviews and security checks repo-aware.
 
@@ -72,12 +72,40 @@ class SecuritySurface(BaseModel):
         description="Paths/env-vars where secrets are read/stored, e.g. '.env'. Empty list if none.")
 
 
-class RepoContextProfileV1(BaseModel):
-    """Canonical single-branch repository profile (the 'brain'). Schema version v1."""
-    schema_version: Literal["repo_context_profile_v1"] = Field(
-        description="Always the literal string 'repo_context_profile_v1'")
+class StackInfo(BaseModel):
+    languages: List[str] = Field(description="Primary programming languages, most-used first")
+    frameworks: List[str] = Field(
+        description="Web/app frameworks and stack-defining libraries (e.g. Django, React, Litestar, Celery)")
+    datastores: List[str] = Field(
+        description="Databases, caches, queues used (e.g. PostgreSQL, Redis, MongoDB). Empty list if none.")
+    infrastructure: List[str] = Field(
+        description="Deploy/runtime/infra signals (e.g. Docker, AWS, GitHub Actions, Vercel). Empty list if none.")
+    package_managers: List[str] = Field(
+        description="Package managers / build tools (e.g. pip, npm, poetry, pnpm)")
+
+
+class KeyFile(BaseModel):
+    path: str = Field(description="Repo-relative path of an important file (entry point, core logic, config, auth)")
+    role: str = Field(description="One concise sentence: what this file is responsible for")
+
+
+class Component(BaseModel):
+    name: str = Field(description="A major module/area, e.g. 'authentication', 'API layer', 'payments', 'worker'")
+    responsibility: str = Field(description="One sentence on what this component does")
+
+
+class RepoContextProfileV2(BaseModel):
+    """Canonical single-branch repository profile (the 'brain'). Schema version v2."""
+    schema_version: Literal["repo_context_profile_v2"] = Field(
+        description="Always the literal string 'repo_context_profile_v2'")
     architecture_summary: str = Field(
         description="3-5 sentences: what the repo does, architecture, primary language/framework, data flow")
+    stack: StackInfo = Field(description="The concrete technology stack actually present in the repo")
+    components: List[Component] = Field(
+        description="Up to 8 major modules/areas of the codebase and what each is responsible for")
+    key_files: List[KeyFile] = Field(
+        description="Up to 10 of the most important files (entry points, core logic, config, auth) a new "
+                    "engineer should read first, each with its role")
     conventions: List[str] = Field(
         description="Up to 8 concrete, observable conventions a reviewer should enforce. No generic advice.")
     dependencies: List[Dependency] = Field(
@@ -230,15 +258,20 @@ Profile EXACTLY what is shown. Never invent files, routes, or dependencies you d
 </role>
 <context><repository>{repo_path}</repository><branch>{branch}</branch></context>
 <task>
-Produce a repo_context_profile_v1 describing architecture, conventions, dependencies,
-secret locations, the auth/route surface, and per-repo review focus areas.
+Produce a repo_context_profile_v2 describing: the architecture, the concrete tech STACK
+(languages, frameworks, datastores, infrastructure, package managers), the major COMPONENTS
+and their responsibilities, the most important KEY FILES and their roles, conventions,
+dependencies, secret locations, the auth/route surface, and per-repo review focus areas.
 </task>
 <rules>
 - High confidence only. If unsure a dep is used or a route is unauthenticated, mark used=false / unauthenticated=false.
+- stack: only technologies ACTUALLY present (from manifests, file extensions, imports). Do not guess.
+- key_files: real paths taken from the file index; the files a new engineer must read first; one concise role each.
+- components: real modules/areas of THIS repo, not generic software concepts.
 - secret_locations: only real read/store sites of credentials. Ignore placeholders/examples.
 - in_auth_path=true only for deps touching auth/session/crypto/token code.
-- Cap dependencies at 30 (prioritise auth/security/network/DB), routes at 12, conventions at 8.
-- schema_version is literally "repo_context_profile_v1".
+- Cap dependencies at 30 (prioritise auth/security/network/DB), routes at 12, components at 8, key_files at 10, conventions at 8.
+- schema_version is literally "repo_context_profile_v2".
 </rules>
 <repo_files>
 {block("readme", readme)}
@@ -269,7 +302,7 @@ def call_llm_with_retry(model, prompt, response_model, attempts=2, sleep_s=2):
 def _sanitize_profile(p):
     """soft_parse can null-fill omitted required fields; coerce to safe shapes."""
     p = dict(p or {})
-    for k in ("conventions", "dependencies", "review_focus"):
+    for k in ("conventions", "dependencies", "review_focus", "components", "key_files"):
         if not isinstance(p.get(k), list):
             p[k] = []
     sec = p.get("security")
@@ -280,9 +313,16 @@ def _sanitize_profile(p):
     if not isinstance(sec.get("secret_locations"), list):
         sec["secret_locations"] = []
     p["security"] = sec
+    stk = p.get("stack")
+    if not isinstance(stk, dict):
+        stk = {}
+    for sk in ("languages", "frameworks", "datastores", "infrastructure", "package_managers"):
+        if not isinstance(stk.get(sk), list):
+            stk[sk] = []
+    p["stack"] = stk
     if not isinstance(p.get("architecture_summary"), str):
         p["architecture_summary"] = ""
-    p["schema_version"] = "repo_context_profile_v1"
+    p["schema_version"] = "repo_context_profile_v2"
     return p
 
 
@@ -300,13 +340,23 @@ def _esc(v):
 def render_brain_html(profiles):
     cards = []
     for repo, p in profiles.items():
-        if not isinstance(p, dict) or p.get("schema_version") != "repo_context_profile_v1":
+        if not isinstance(p, dict) or p.get("schema_version") != "repo_context_profile_v2":
             continue
         sec = p.get("security") or {}
         routes = sec.get("routes") or []
         deps = p.get("dependencies") or []
         open_routes = [r for r in routes if r.get("unauthenticated")]
         deps_auth = [d for d in deps if d.get("in_auth_path")]
+        stk = p.get("stack") or {}
+        tech = ((stk.get("languages") or []) + (stk.get("frameworks") or [])
+                + (stk.get("datastores") or []) + (stk.get("infrastructure") or []))
+        tech_html = "".join(f"<span class='tech'>{_esc(t)}</span>" for t in tech[:16])
+        kf_html = "".join(
+            f"<li><code>{_esc(k.get('path'))}</code> — {_esc(k.get('role'))}</li>"
+            for k in (p.get("key_files") or [])[:10])
+        comp_html = "".join(
+            f"<li><b>{_esc(c.get('name'))}</b> — {_esc(c.get('responsibility'))}</li>"
+            for c in (p.get("components") or [])[:8])
         conv = "".join(f"<li>{_esc(c)}</li>" for c in (p.get("conventions") or [])[:8])
         routes_html = "".join(
             f"<li>{_esc(r.get('route'))} <span class='badge {'open' if r.get('unauthenticated') else 'auth'}'>"
@@ -315,11 +365,14 @@ def render_brain_html(profiles):
         cards.append(f"""<div class="card">
           <h3>{_esc(repo)} <span class="branch">{_esc(fp.get('branch', ''))}</span></h3>
           <p class="summary">{_esc(p.get('architecture_summary', ''))}</p>
+          <div class="tech-row">{tech_html or '<span class=muted>stack not detected</span>'}</div>
           <div class="stat-row">
             <span class="stat"><b>{len(deps)}</b> deps</span>
             <span class="stat"><b>{len(deps_auth)}</b> in auth path</span>
             <span class="stat"><b>{len(open_routes)}</b> public routes</span>
             <span class="stat"><b>{len(sec.get('secret_locations') or [])}</b> secret sites</span></div>
+          <h4>Key files</h4><ul class="kf">{kf_html or '<li class=muted>None.</li>'}</ul>
+          <h4>Components</h4><ul>{comp_html or '<li class=muted>None.</li>'}</ul>
           <h4>Conventions</h4><ul>{conv or '<li class=muted>None recorded.</li>'}</ul>
           <h4>Routes</h4><ul class="routes">{routes_html or '<li class=muted>None.</li>'}</ul>
           <p class="fp muted">fingerprint {_esc(fp.get('sha', ''))[:10]} · built {_esc(fp.get('built_at', ''))}</p>
@@ -330,9 +383,12 @@ def render_brain_html(profiles):
       .header{{border-top:4px solid {BRAND};background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:16px}}
       .card{{background:#fff;border:1px solid #e5e7eb;border-left:3px solid {BRAND};border-radius:12px;padding:14px;margin:12px 0}}
       h3 .branch{{font-size:12px;color:{BRAND};background:#eafff3;padding:2px 8px;border-radius:10px;margin-left:6px}}
+      .tech-row{{margin:8px 0 4px}} .tech{{display:inline-block;font-size:11px;background:#eef2f6;color:#334155;border:1px solid #dbe2ea;border-radius:999px;padding:2px 9px;margin:0 5px 5px 0}}
       .stat-row{{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}} .stat b{{color:{BRAND}}}
       .badge.open{{color:#b91c1c;font-weight:700}} .badge.auth{{color:#16794a}}
-      .muted{{color:#94a3b8}} ul{{margin:6px 0 12px 18px}} .fp{{font-size:11px}}
+      code{{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#f3f4f6;padding:1px 5px;border-radius:5px;color:#0b3d24}}
+      h4{{margin:12px 0 4px;font-size:13px;color:#0f1116}}
+      .muted{{color:#94a3b8}} ul{{margin:6px 0 12px 18px}} li{{margin:3px 0}} .fp{{font-size:11px}}
     </style></head><body><div class="wrap">
       <div class="header"><h1 style="margin:0;color:#0f1116">Repository Brain</h1>
       <p class="muted" style="margin:4px 0 0">{len(profiles)} repositories profiled · GitZoid</p></div>
@@ -345,7 +401,7 @@ def render_brain_html(profiles):
 def needs_rebuild(existing, chosen_sha):
     if not existing:
         return True
-    if existing.get("schema_version") != "repo_context_profile_v1":
+    if existing.get("schema_version") != "repo_context_profile_v2":
         return True
     fp = existing.get("_fingerprint", {})
     if fp.get("sha") != chosen_sha:
@@ -395,7 +451,7 @@ for repo in repositories:
         profile = call_llm_with_retry(
             model_name,
             build_brain_prompt(repo_path, chosen["branch"], readme, manifests, key_files, file_list),
-            RepoContextProfileV1, attempts=3)
+            RepoContextProfileV2, attempts=3)
         profile_dict = _sanitize_profile(profile.model_dump())
         profile_dict["_fingerprint"] = {"sha": chosen["sha"], "branch": chosen["branch"],
                                         "built_at": datetime.now(timezone.utc).isoformat(),

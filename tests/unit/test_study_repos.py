@@ -20,7 +20,7 @@ from study_repos import (
     store_profile,
     get_branch_tree,
     call_llm_with_retry,
-    RepoContextProfileV1,
+    RepoContextProfileV2,
 )
 
 
@@ -70,21 +70,27 @@ class TestStalenessGate:
         assert needs_rebuild({}, "abc") is True
 
     def test_moved_sha_rebuilds(self):
-        existing = {"schema_version": "repo_context_profile_v1",
+        existing = {"schema_version": "repo_context_profile_v2",
                     "_fingerprint": {"sha": "x", "built_at": datetime.now(timezone.utc).isoformat()}}
         assert needs_rebuild(existing, "y") is True
 
     def test_old_schema_rebuilds(self):
         assert needs_rebuild({"summary": "old proto-brain shape"}, "abc") is True
 
+    def test_v1_schema_rebuilds(self):
+        # a v1 profile must be re-studied into the richer v2 schema (migration, not silent reuse)
+        v1 = {"schema_version": "repo_context_profile_v1",
+              "_fingerprint": {"sha": "abc", "built_at": datetime.now(timezone.utc).isoformat()}}
+        assert needs_rebuild(v1, "abc") is True
+
     def test_fresh_skips(self):
-        existing = {"schema_version": "repo_context_profile_v1",
+        existing = {"schema_version": "repo_context_profile_v2",
                     "_fingerprint": {"sha": "abc", "built_at": datetime.now(timezone.utc).isoformat()}}
         assert needs_rebuild(existing, "abc") is False
 
     def test_ttl_expired_rebuilds(self):
         old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        existing = {"schema_version": "repo_context_profile_v1",
+        existing = {"schema_version": "repo_context_profile_v2",
                     "_fingerprint": {"sha": "abc", "built_at": old}}
         assert needs_rebuild(existing, "abc") is True
 
@@ -113,18 +119,28 @@ class TestTreeTruncation:
 
 class TestSanitizer:
     def test_none_lists_coerced(self):
-        p = _sanitize_profile({"schema_version": "repo_context_profile_v1",
-                               "conventions": None, "security": None})
+        p = _sanitize_profile({"schema_version": "repo_context_profile_v2",
+                               "conventions": None, "security": None,
+                               "stack": None, "components": None, "key_files": None})
         assert p["conventions"] == []
         assert p["security"]["routes"] == []
         assert p["security"]["secret_locations"] == []
+        assert p["stack"]["languages"] == []
+        assert p["stack"]["frameworks"] == []
+        assert p["components"] == []
+        assert p["key_files"] == []
 
 
 class TestBrainHtml:
     def test_renders_and_flags_public(self):
-        prof = {"schema_version": "repo_context_profile_v1",
+        prof = {"schema_version": "repo_context_profile_v2",
                 "architecture_summary": "A Flask API.",
                 "conventions": ["snake_case"],
+                "stack": {"languages": ["Python"], "frameworks": ["Flask"],
+                          "datastores": ["PostgreSQL"], "infrastructure": [],
+                          "package_managers": ["pip"]},
+                "components": [{"name": "auth", "responsibility": "login + JWT"}],
+                "key_files": [{"path": "app/auth.py", "role": "JWT signing and verification"}],
                 "dependencies": [{"name": "pyjwt", "in_auth_path": True}],
                 "security": {"routes": [{"route": "POST /login", "unauthenticated": True}],
                              "secret_locations": [".env"]},
@@ -134,6 +150,8 @@ class TestBrainHtml:
         assert "o/r" in h
         assert "PUBLIC" in h
         assert "#1ED66C" in h
+        assert "Flask" in h           # stack rendered
+        assert "app/auth.py" in h     # key file rendered
 
     def test_ignores_old_schema(self):
         assert "No profiles yet." in render_brain_html({"o/r": {"summary": "old"}})
@@ -141,21 +159,29 @@ class TestBrainHtml:
 
 class TestProfileModel:
     def test_full_payload_validates(self):
-        m = RepoContextProfileV1.model_validate({
-            "schema_version": "repo_context_profile_v1",
+        m = RepoContextProfileV2.model_validate({
+            "schema_version": "repo_context_profile_v2",
             "architecture_summary": "x",
+            "stack": {"languages": ["Python"], "frameworks": ["Django"],
+                      "datastores": ["PostgreSQL"], "infrastructure": ["Docker"],
+                      "package_managers": ["pip"]},
+            "components": [{"name": "api", "responsibility": "REST endpoints"}],
+            "key_files": [{"path": "manage.py", "role": "Django entry point"}],
             "conventions": [],
             "dependencies": [],
             "security": {"routes": [], "secret_locations": []},
             "review_focus": [],
         })
-        assert m.schema_version == "repo_context_profile_v1"
+        assert m.schema_version == "repo_context_profile_v2"
+        assert m.stack.frameworks == ["Django"]
+        assert m.key_files[0].path == "manage.py"
+        assert m.components[0].name == "api"
 
 
 class TestAtomicWrite:
     def test_store_profile_per_repo_key(self):
         wa = Mock()
-        store_profile(wa, "o/r", {"schema_version": "repo_context_profile_v1"})
+        store_profile(wa, "o/r", {"schema_version": "repo_context_profile_v2"})
         args, kwargs = wa.store_data.call_args
         assert args[0] == "profile:o/r"
         assert kwargs.get("data_type") == "json"
@@ -165,14 +191,14 @@ class TestCallLlmRetry:
     def test_succeeds_first_try(self):
         with patch('study_repos.waveassist.call_llm') as m:
             m.return_value = "RESULT"
-            out = call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=3, sleep_s=0)
+            out = call_llm_with_retry("model", "prompt", RepoContextProfileV2, attempts=3, sleep_s=0)
             assert out == "RESULT"
             assert m.call_count == 1
 
     def test_retries_then_succeeds(self):
         with patch('study_repos.waveassist.call_llm') as m:
             m.side_effect = [RuntimeError("transient"), "RESULT"]
-            out = call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=3, sleep_s=0)
+            out = call_llm_with_retry("model", "prompt", RepoContextProfileV2, attempts=3, sleep_s=0)
             assert out == "RESULT"
             assert m.call_count == 2
 
@@ -180,5 +206,5 @@ class TestCallLlmRetry:
         with patch('study_repos.waveassist.call_llm') as m:
             m.side_effect = RuntimeError("down")
             with pytest.raises(RuntimeError):
-                call_llm_with_retry("model", "prompt", RepoContextProfileV1, attempts=2, sleep_s=0)
+                call_llm_with_retry("model", "prompt", RepoContextProfileV2, attempts=2, sleep_s=0)
             assert m.call_count == 2

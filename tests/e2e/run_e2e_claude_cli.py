@@ -91,7 +91,7 @@ def store_data(key, value, **k):
     if not WRITE:
         if str(key).startswith("profile:"):
             print(f"\n=== [DRY] would store {key} ===")
-            print(json.dumps(value, indent=2, default=str)[:6000])
+            print(json.dumps(value, indent=2, default=str)[:20000])
         else:
             print(f"=== [DRY] would store {key} (type={k.get('data_type')}, len={len(str(value))}) ===")
         return True
