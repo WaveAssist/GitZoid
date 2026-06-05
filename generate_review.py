@@ -97,7 +97,7 @@ class Finding(BaseModel):
         description="how sure this is real on this exact line")
     category: Literal["bug", "security", "optimization", "suggestion"] = Field(
         description="bug=correctness; security=secret/injection/authz; optimization=perf/readability; suggestion=nit/style")
-    body: str = Field(description="One or two sentences. Neutral, no praise, no alarm, no emojis.")
+    body: str = Field(description="One or two PLAIN-ENGLISH sentences: the problem and its real-world impact, NOT code internals (no variable/function narration). Neutral, no praise, no alarm, no emojis.")
     suggested_replacement: Optional[str] = Field(default=None,
         description="ONLY for a mechanical single-line fix: exact replacement for `line`. Omit otherwise.")
 
@@ -105,10 +105,10 @@ class Finding(BaseModel):
 class ReviewResult(BaseModel):
     """Full (first-time) PR review. No verdict field — the gate computes the verdict."""
     summary: List[str] = Field(default_factory=list,
-        description="1-2 short plain-English points: what this PR does")
+        description="1-2 simple sentences a non-author understands: what this PR does and why. No variable/function walkthrough.")
     findings: List[Finding] = Field(default_factory=list)
     potential_optimizations: List[str] = Field(default_factory=list,
-        description="Non-blocking improvements (perf/readability) — the valued 'Potential Optimizations' tier")
+        description="Non-blocking improvements stated as a PLAIN problem (e.g. 'the same data is loaded twice, can be cached'), not code mechanics.")
     suggestions: List[str] = Field(default_factory=list, description="Nits, free-form, capped at render time")
 
 
@@ -205,6 +205,13 @@ _REVIEW_RULES = """
   <instructions>
     You are a precise, senior code reviewer. Review ONLY the provided diff.
     Output findings as structured objects. Each finding MUST have severity, confidence, category.
+    AUDIENCE & LANGUAGE (read this first — it matters most):
+    - Your reader is a busy tech lead reviewing a teammate's PR. They do NOT know this codebase's variables, functions, or internal layout. They need the PROBLEM and its real-world IMPACT in plain English, nothing more.
+    - Write like you are telling a colleague in one sentence. Do NOT narrate code mechanics: no variable names, no "X is not in scope", no function-call chains, no "it re-fetches via Y". The engineer/AI will handle the fix; the reader only needs to grasp the problem and why it matters.
+    - Name a specific function/file ONLY if essential to locate the issue, never as the explanation itself. (The line number already locates inline findings.)
+    - BAD (too technical): "In submit_form_step_api, registration_array is not in scope at the call site, so check_join_booking_capacity re-fetches it with an extra DB round-trip."
+    - GOOD (plain, problem-first): "The same registration data is loaded from the database twice for one request; the duplicate query can be avoided."
+    - summary: 1-2 simple sentences on what this PR does and why, in words a non-author understands. No variable/function walkthrough.
     PRECISION RULES (most important):
     - Only report something you can justify directly from the shown diff lines.
     - If unsure, lower confidence — do not omit it.

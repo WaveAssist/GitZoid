@@ -65,7 +65,7 @@ class TestBuildSummaryMd:
         md = build_summary_md(review, ledger, ["a.py", "b.py"], "abc1234")
         assert SUMMARY_MARKER not in md      # marker is added at post time, not by the body builder
         assert "automated AI-generated review" in md            # intro line restored
-        assert "⚠️ **Needs changes** — 2 to fix, 1 optional improvement, 1 suggestion" in md
+        assert "Needs changes" not in md and "Minor comments" not in md   # verdict label removed
         assert "## 📝 Summary" in md and "- does X" in md       # summary as bullets
         assert "## ⚠️ Potential Issues (1)" in md               # non-security findings only
         assert "🐛" in md and "_high_" in md                    # category icon + severity in the row
@@ -77,9 +77,9 @@ class TestBuildSummaryMd:
         assert "💡 Suggestions (1)" in md and "rename foo" in md
         assert "abc1234" in md
 
-    def test_clean_pr_verdict(self):
+    def test_clean_pr_summary(self):
         md = build_summary_md({"verdict": "looks_good", "summary": ["small change"]}, {}, [], "deadbee")
-        assert "Looks good" in md
+        assert "Looks good" not in md          # no verdict label
         assert "## 📝 Summary" in md and "- small change" in md
         assert "automated AI-generated review" in md
 

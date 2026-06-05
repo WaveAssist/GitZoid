@@ -140,36 +140,43 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short):
     verdict = review.get("verdict", "minor_comments")
     open_all = [v for v in findings_ledger.values() if v.get("status") == "open"]
     fixed_all = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
-    open_issues = [v for v in open_all if v.get("category") != "security"]
-    open_sec = [v for v in open_all if v.get("category") == "security"]
-    opts = review.get("potential_optimizations") or []
-    sugg = review.get("suggestions") or []
+    # Route findings to their natural section by category (not "everything non-security = issue").
+    bugs = [v for v in open_all if v.get("category") == "bug"]
+    sec = [v for v in open_all if v.get("category") == "security"]
+    opt_f = [v for v in open_all if v.get("category") == "optimization"]
+    sug_f = [v for v in open_all if v.get("category") == "suggestion"]
+    free_opts = review.get("potential_optimizations") or []
+    free_sugg = review.get("suggestions") or []
     summary_pts = review.get("summary") or review.get("changes_summary") or []
+    n_opt = len(opt_f) + len(free_opts)
+    n_sug = len(sug_f) + len(free_sugg)
 
-    # NOTE: the SUMMARY_MARKER is added by create_/edit_summary_comment at post time, not here.
-    lines = [INTRO, "", _verdict_line(verdict, len(open_all), len(opts), len(sugg)), ""]
+    # SUMMARY_MARKER is added at post time. No verdict label — the plain Summary leads (user feedback).
+    lines = [INTRO, ""]
     if summary_pts:
         lines.append("## 📝 Summary")
         lines += [f"- {s}" for s in summary_pts]
         lines.append("")
-    if open_issues or fixed_all:
-        lines.append(f"## ⚠️ Potential Issues ({len(open_issues)})")
-        for v in open_issues:
+    if bugs or fixed_all:
+        lines.append(f"## ⚠️ Potential Issues ({len(bugs)})")
+        for v in bugs:
             lines.append(_finding_row(v))
         for v in fixed_all[:20]:
             lines.append(_finding_row(v, struck=True))
         lines.append("")
-    if open_sec:
-        lines.append(f"## 🔒 Security ({len(open_sec)})")
-        lines += [_finding_row(v) for v in open_sec]
+    if sec:
+        lines.append(f"## 🔒 Security ({len(sec)})")
+        lines += [_finding_row(v) for v in sec]
         lines.append("")
-    if opts:
-        lines.append(f"## 🚀 Potential Optimizations ({len(opts)})")
-        lines += [f"- {o}" for o in opts]
+    if opt_f or free_opts:
+        lines.append(f"## 🚀 Potential Optimizations ({n_opt})")
+        lines += [_finding_row(v) for v in opt_f]
+        lines += [f"- {o}" for o in free_opts]
         lines.append("")
-    if sugg:
-        lines.append(f"<details><summary>💡 Suggestions ({len(sugg)})</summary>\n")
-        lines += [f"- {s}" for s in sugg[:5]]
+    if sug_f or free_sugg:
+        lines.append(f"<details><summary>💡 Suggestions ({n_sug})</summary>\n")
+        lines += [_finding_row(v) for v in sug_f]
+        lines += [f"- {s}" for s in free_sugg[:5]]
         lines.append("\n</details>")
         lines.append("")
     if changed_files:
