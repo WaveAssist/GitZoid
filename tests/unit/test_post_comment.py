@@ -12,6 +12,7 @@ from post_comment import (
     finding_sig,
     findings_to_inline_comments,
     build_summary_md,
+    rekey_ledger,
     reconcile_ledger,
     update_reviewed_prs,
     create_pr_review,
@@ -31,6 +32,29 @@ class TestFindingSig:
     def test_stable_and_distinct(self):
         assert finding_sig(_F()) == finding_sig(_F())
         assert finding_sig(_F()) != finding_sig(_F(body="different"))
+
+    def test_position_independent(self):
+        # Same issue, different line/side → same identity (survives line shifts across commits).
+        assert finding_sig(_F(line=5)) == finding_sig(_F(line=99, side="LEFT"))
+
+
+class TestRekeyLedger:
+    def test_rekeys_stale_keys_so_findings_still_match(self):
+        f = _F()
+        # A ledger persisted under an OLD-format key, with the entry fields preserved.
+        old = {"OLD-STALE-KEY": {**f, "status": "open", "first_seen_sha": "s0"}}
+        migrated = rekey_ledger(old)
+        assert "OLD-STALE-KEY" not in migrated
+        assert finding_sig(f) in migrated                      # now keyed by the current sig
+        # A re-review that re-finds the same issue carries it (open), not false-fixed + duplicated.
+        ledger, inline = reconcile_ledger(migrated, [f], "s1", is_update=True)
+        assert list(ledger.values())[0]["status"] == "open"
+        assert inline == []                                    # not re-posted as new
+        assert ledger[finding_sig(f)]["first_seen_sha"] == "s0"  # history preserved
+
+    def test_empty_and_legacy_safe(self):
+        assert rekey_ledger({}) == {}
+        assert rekey_ledger(None) == {}
 
 
 class TestFindingsToInline:
@@ -67,10 +91,12 @@ class TestBuildSummaryMd:
         assert "automated AI-generated review" in md            # intro line restored
         assert "Needs changes" not in md and "Minor comments" not in md   # verdict label removed
         assert "## 📝 Summary" in md and "- does X" in md       # summary as bullets
-        assert "## ⚠️ Potential Issues (1)" in md               # non-security findings only
-        assert "🐛" in md and "_high_" in md                    # category icon + severity in the row
-        assert "real bug" in md
-        assert "~~`b.py:2` — old issue~~ ✅" in md              # struck-through fixed
+        assert "## ⚠️ Potential Issues (1)" in md               # only OPEN, non-security findings counted
+        assert "_high_ `a.py:5` — real bug" in md               # severity text, no per-line emoji
+        assert "🐛" not in md                                    # no per-line category emoji
+        assert "✅ Resolved (1)" in md                           # fixed findings in their own dropdown (header emoji ok)
+        assert "- `b.py:2` — old issue" in md                    # resolved row: clean, no emoji, no severity
+        assert "~~" not in md                                    # nothing struck through anymore
         assert "## 🚀 Potential Optimizations (1)" in md
         assert "batch the calls" in md
         assert "## 🔒 Security (1)" in md and "live secret" in md
@@ -82,6 +108,20 @@ class TestBuildSummaryMd:
         assert "Looks good" not in md          # no verdict label
         assert "## 📝 Summary" in md and "- small change" in md
         assert "automated AI-generated review" in md
+
+    def test_update_resolved_without_status_line(self):
+        # On a re-review the section counts convey the change; there is no separate "since last review" line.
+        ledger = {
+            "c1": {"path": "a.py", "line": 5, "body": "carried bug", "category": "bug",
+                   "severity": "high", "status": "open", "first_seen_sha": "oldsha"},
+            "f1": {"path": "b.py", "line": 2, "body": "fixed bug", "category": "bug", "status": "fixed"},
+        }
+        md = build_summary_md({"verdict": "needs_changes", "summary": ["does X"]}, ledger,
+                              ["a.py"], "newsha1", current_sha="newsha", is_update=True)
+        assert "Since the last review" not in md          # removed
+        assert "## ⚠️ Potential Issues (1)" in md         # carried open issue
+        assert "✅ Resolved (1)" in md                     # resolved in its dropdown
+        assert "- `b.py:2` — fixed bug" in md             # clean resolved row
 
 
 class TestReconcileLedger:

@@ -112,12 +112,16 @@ class ReviewResult(BaseModel):
     suggestions: List[str] = Field(default_factory=list, description="Nits, free-form, capped at render time")
 
 
-class IncrementalReviewResult(BaseModel):
-    """Incremental review after new commits. Same Finding shape; gate computes the verdict."""
-    changes_summary: List[str] = Field(default_factory=list)
+class UpdateReviewResult(BaseModel):
+    """Re-review after new commits. Reviews the FULL current PR (not just the new diff) so the
+    open/fixed ledger stays accurate — an issue is 'fixed' only when it is truly gone from the
+    code, not merely absent from the latest commit's diff. Same Finding shape; gate computes verdict."""
+    summary: List[str] = Field(default_factory=list,
+        description="1-2 simple sentences: what this PR does as it stands now.")
+    findings: List[Finding] = Field(default_factory=list,
+        description="ALL concerns present in the current code. Re-state a still-present prior finding using the SAME wording as before so it is recognized as the same issue.")
     addressed_issues: List[str] = Field(default_factory=list,
-        description="Prior findings these commits appear to fix")
-    findings: List[Finding] = Field(default_factory=list)
+        description="Prior findings that are now genuinely fixed in the current code.")
     potential_optimizations: List[str] = Field(default_factory=list)
     suggestions: List[str] = Field(default_factory=list)
 
@@ -248,18 +252,20 @@ def get_full_review_prompt(review_pr, max_input_tokens=20000, additional_context
 """
 
 
-def get_incremental_review_prompt(review_pr, previous_review=None, max_input_tokens=20000, additional_context=None):
-    """Brain-aware prompt for a follow-up review of NEW commits."""
+def get_update_review_prompt(review_pr, previous_review=None, max_input_tokens=20000, additional_context=None):
+    """Re-review prompt after new commits. Reviews the FULL current PR (all changed files), with the
+    prior review in context. Reviewing the whole PR — not just the new diff — is what makes the
+    open/fixed ledger correct: a prior issue is only 'fixed' if it is genuinely gone now."""
     formatted_files = format_changed_files(review_pr.get("files"), int(max_input_tokens * TOKEN_MULTIPLIER))
     prev_sha = (review_pr.get("previous_sha") or "")[:7]
     cur_sha = (review_pr.get("current_sha") or "")[:7]
     previous_block = ""
     if previous_review:
         previous_block = f"""
-  <previous_review note="GitZoid's prior review. Use to decide what is now addressed; do NOT re-raise a resolved item.">
+  <previous_review note="GitZoid's prior review of this PR. New commits have since been pushed.">
 {previous_review}
   </previous_review>"""
-    return f"""<pr_review type="incremental" previous_sha="{prev_sha}" current_sha="{cur_sha}">
+    return f"""<pr_review type="update" previous_sha="{prev_sha}" current_sha="{cur_sha}">
 {_REVIEW_RULES}
 {_format_brain_profile(review_pr.get("brain_profile"))}
 {_format_context(additional_context)}{previous_block}
@@ -268,10 +274,17 @@ def get_incremental_review_prompt(review_pr, previous_review=None, max_input_tok
     <title>{review_pr.get("title")}</title>
     <description>{review_pr.get("body")}</description>
   </pr_metadata>
-  <new_changes note="ONLY the diff from {prev_sha} to {cur_sha}.">
+  <changed_files note="The FULL current diff of this PR (state as of {cur_sha}). Some files may be truncated.">
 {formatted_files}
-  </new_changes>
-  <task>Produce: changes_summary, addressed_issues[], findings[] for NEW concerns only, potential_optimizations[], suggestions[]. Do not re-raise resolved items. Apply the security sweep to new lines.</task>
+  </changed_files>
+  <task>
+    This PR was reviewed before; new commits have landed. Review the FULL current code shown above and report its CURRENT state:
+    - findings[]: EVERY concern present in the code as it stands now. For any prior-review issue that is STILL present, re-state it with the SAME wording as before so it is recognized as the same issue (do not reword unchanged issues). Include genuinely new concerns too.
+    - addressed_issues[]: prior-review issues that are now actually fixed in the current code.
+    - summary[]: 1-2 plain sentences on what the PR does now.
+    - potential_optimizations[], suggestions[]. Apply the security sweep.
+    Decide 'fixed vs still-present' from the current code, never from which file the latest commit happened to touch.
+  </task>
 </pr_review>
 """
 
@@ -344,8 +357,12 @@ def _sanitize_findings(findings):
 
 
 def finding_sig(f):
-    raw = f"{f.get('category', '')}|{f.get('path', '')}|{f.get('line')}|{f.get('side', 'RIGHT')}|" \
-          f"{' '.join((f.get('body') or '').lower().split())[:120]}"
+    """Position-independent identity. Deliberately EXCLUDES line/side so a finding keeps the
+    same signature across commits even when surrounding edits shift its line number — otherwise
+    a still-present issue would look 'fixed' (old sig gone) AND 'new' (new sig) on every push.
+    Identity = category + file + the normalized problem text."""
+    raw = f"{f.get('category', '')}|{f.get('path', '')}|" \
+          f"{' '.join((f.get('body') or '').lower().split())[:160]}"
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
@@ -467,10 +484,12 @@ if prs:
             review_type = pr.get("review_type", "full")
 
             if review_type == "incremental":
-                prompt = get_incremental_review_prompt(
+                # Re-review the FULL current PR (with the prior review in context), not just the new diff,
+                # so the open/fixed ledger reflects the real current state of the code.
+                prompt = get_update_review_prompt(
                     pr, previous_review=pr.get("previous_review_text"), additional_context=additional_context)
                 result = waveassist.call_llm(model=model_name, prompt=prompt,
-                                             response_model=IncrementalReviewResult,
+                                             response_model=UpdateReviewResult,
                                              should_retry=True, max_tokens=MAX_TOKENS)
             else:
                 prompt = get_full_review_prompt(pr, additional_context=additional_context)

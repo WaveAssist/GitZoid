@@ -22,7 +22,9 @@ if not os.environ.get("uid") or not os.environ.get("project_key"):
     sys.exit("ERROR: set uid=<...> and project_key=<...> in the environment.")
 
 TARGET = next((a for a in sys.argv[1:] if not a.startswith("--")), "WaveAssist/GitZoid")
-LIVE = "--live" in sys.argv   # --live actually POSTS to GitHub; default is preview-only
+LIVE = "--live" in sys.argv          # --live actually POSTS to GitHub; default is preview-only
+INCREMENTAL = "--incremental" in sys.argv  # seed an old SHA so the "new commits" (update) path fires
+PR_ARG = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--pr=")), None)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import waveassist  # noqa: E402
@@ -63,15 +65,57 @@ def _rid(r):
 
 full_repos = _real_fetch("github_selected_resources", default=[]) or []
 _store["github_selected_resources"] = [r for r in full_repos if _rid(r) == TARGET] or [{"id": TARGET, "properties": {}}]
-_store["reviewed_prs"] = {}
 
 waveassist.call_llm = _local_call_llm
 waveassist.fetch_data = _fetch
 waveassist.store_data = _store_data
 waveassist.is_test_run = lambda: not LIVE   # default preview; --live actually posts to GitHub
 
-print(f"[review-e2e] target={TARGET}  model={os.environ['CLAUDE_CLI_MODEL']}  "
-      f"mode={'LIVE-POST' if LIVE else 'preview-only'}\n")
+
+def _seed_incremental():
+    """Make ONE open PR look already-reviewed at its second-to-last commit, so
+    fetch_pull_requests takes the 'new commits detected' path and reviews only the newest commit.
+    Returns the seeded reviewed_prs dict (empty if no suitable PR found)."""
+    import requests as _rq
+    tok = _real_fetch("github_access_token", default="") or ""
+    H = {"Authorization": f"token {tok}", "Accept": "application/vnd.github+json"}
+
+    def commits(n):
+        r = _rq.get(f"https://api.github.com/repos/{TARGET}/pulls/{n}/commits",
+                    headers=H, params={"per_page": 100}, timeout=30)
+        return r.json() if r.status_code == 200 else []
+
+    chosen = None
+    if PR_ARG:
+        cs = commits(int(PR_ARG))
+        if len(cs) >= 2:
+            chosen = (int(PR_ARG), cs)
+    else:
+        r = _rq.get(f"https://api.github.com/repos/{TARGET}/pulls", headers=H,
+                    params={"state": "open", "sort": "created", "direction": "desc", "per_page": 30}, timeout=30)
+        for p in (r.json() if r.status_code == 200 else []):
+            cs = commits(p["number"])
+            if len(cs) >= 2:
+                chosen = (p["number"], cs)
+                break
+    if not chosen:
+        return {}
+    num, cs = chosen
+    old_sha = cs[-2]["sha"]   # pretend the last review stopped here; the final commit is "new"
+    print(f"[incremental] seeded PR #{num} as reviewed at {old_sha[:7]} → reviews the newest commit only\n")
+    return {f"{TARGET}#{num}": {
+        "status": "reviewed", "last_reviewed_sha": old_sha,
+        "last_review_text": "## 📝 Summary\n- (prior GitZoid review — placeholder for the incremental test)",
+        "reviewed_at": "2026-01-01T00:00:00+00:00",
+    }}
+
+
+_store["reviewed_prs"] = _seed_incremental() if INCREMENTAL else {}
+if INCREMENTAL and not _store["reviewed_prs"]:
+    sys.exit("ERROR: --incremental needs an open PR with >=2 commits; none found on this repo.")
+
+_mode = "INCREMENTAL " + ("LIVE-POST" if LIVE else "preview-only") if INCREMENTAL else ("LIVE-POST" if LIVE else "preview-only")
+print(f"[review-e2e] target={TARGET}  model={os.environ['CLAUDE_CLI_MODEL']}  mode={_mode}\n")
 
 import fetch_pull_requests  # noqa: E402,F401
 pulls = _store.get("pull_requests", [])

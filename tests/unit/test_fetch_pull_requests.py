@@ -413,10 +413,10 @@ class TestFetchAndProcessPRs:
         # This is expected behavior - cleanup sets changed = True
         assert changed == True
     
-    @patch('fetch_pull_requests.fetch_compare_diff')
+    @patch('fetch_pull_requests.fetch_pr_files')
     @patch('fetch_pull_requests.requests.get')
-    def test_detects_new_commits(self, mock_get, mock_compare_diff):
-        """Test detecting new commits on reviewed PR."""
+    def test_detects_new_commits(self, mock_get, mock_fetch_files):
+        """Test detecting new commits on reviewed PR (re-review pulls the FULL PR, not the compare diff)."""
         from datetime import datetime, timezone
         recent_date = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         pr123 = {
@@ -434,8 +434,8 @@ class TestFetchAndProcessPRs:
         mock_response.json.return_value = [pr123]
         mock_get.return_value = mock_response
         
-        # Mock compare diff - must return non-empty list
-        mock_compare_diff.return_value = [{"filename": "test.py", "patch": "new diff", "status": "modified", "additions": 1, "deletions": 0}]
+        # Mock full PR files - must return non-empty list (re-review reviews the whole PR)
+        mock_fetch_files.return_value = [{"filename": "test.py", "patch": "new diff", "status": "modified", "additions": 1, "deletions": 0}]
         
         repo_metadata = {"id": "owner/repo"}
         access_token = "fake_token"
@@ -454,7 +454,7 @@ class TestFetchAndProcessPRs:
         assert prs[0]["review_type"] == "incremental"
         assert prs[0]["previous_sha"] == "old123"
         assert prs[0]["current_sha"] == "new456"
-        mock_compare_diff.assert_called_once()
+        mock_fetch_files.assert_called_once()
     
     @patch('fetch_pull_requests.fetch_pr_files')
     @patch('fetch_pull_requests.requests.get')

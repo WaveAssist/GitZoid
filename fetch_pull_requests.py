@@ -285,11 +285,14 @@ def fetch_and_process_prs(
                         previous_review_text = pr_info.get("last_review_text")
                         if stored_sha and head_sha and head_sha != stored_sha and previous_review_text:
                             print(f"🔄 New commits detected on PR #{pr_number}: {stored_sha[:7]} → {head_sha[:7]}")
-                            new_files = fetch_compare_diff(repo_path, stored_sha, head_sha, headers)
-                            
-                            if new_files:
+                            # Re-review the FULL current PR (not just stored_sha..head_sha) so the
+                            # open/fixed ledger reflects the real current state — an issue counts as
+                            # fixed only when it is truly gone, not merely outside the latest commit.
+                            full_files = fetch_pr_files(repo_path, pr_number, headers)
+
+                            if full_files:
                                 pr_data = build_pr_data(
-                                    pr, new_files, "incremental", head_sha, repo_path, stored_sha,
+                                    pr, full_files, "incremental", head_sha, repo_path, stored_sha,
                                     previous_review_text, brain_profile=brain_profile
                                 )
                                 prs_to_review.append(pr_data)

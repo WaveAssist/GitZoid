@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from generate_review import (
     format_changed_files,
     get_full_review_prompt,
-    get_incremental_review_prompt,
+    get_update_review_prompt,
     Finding,
     ReviewResult,
     build_diff_lines,
@@ -104,22 +104,24 @@ class TestFullReviewPrompt:
         assert "additional_context" not in get_full_review_prompt(pr, additional_context=None)
 
 
-class TestIncrementalReviewPrompt:
+class TestUpdateReviewPrompt:
     def test_includes_sha_and_previous(self):
         pr = {"pr_number": 1, "title": "t", "body": "b", "files": [],
               "previous_sha": "abc123def", "current_sha": "def456ghi"}
-        prompt = get_incremental_review_prompt(pr, previous_review="Prior review text")
+        prompt = get_update_review_prompt(pr, previous_review="Prior review text")
         assert "abc123d" in prompt
         assert "def456g" in prompt
-        assert "incremental" in prompt
+        assert 'type="update"' in prompt
         assert "Prior review text" in prompt
         assert "previous_review" in prompt
-        assert "re-raise" in prompt.lower()
+        # Re-review must look at the FULL current PR, not only the latest commit's diff.
+        assert "changed_files" in prompt
+        assert "full current" in prompt.lower()
 
     def test_excludes_missing_previous(self):
         pr = {"pr_number": 1, "title": "t", "body": "b", "files": [],
               "previous_sha": "a", "current_sha": "b"}
-        prompt = get_incremental_review_prompt(pr, previous_review=None)
+        prompt = get_update_review_prompt(pr, previous_review=None)
         assert "previous_review" not in prompt
 
 

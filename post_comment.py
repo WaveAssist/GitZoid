@@ -40,9 +40,11 @@ def _gh_headers(token):
 
 
 def finding_sig(f):
-    """Stable signature of a finding (duplicated from generate_review — nodes never import siblings)."""
-    raw = f"{f.get('category', '')}|{f.get('path', '')}|{f.get('line')}|{f.get('side', 'RIGHT')}|" \
-          f"{' '.join((f.get('body') or '').lower().split())[:120]}"
+    """Stable signature of a finding (duplicated from generate_review — nodes never import siblings).
+    Position-independent: EXCLUDES line/side so a finding survives line shifts across commits.
+    Identity = category + file + the normalized problem text."""
+    raw = f"{f.get('category', '')}|{f.get('path', '')}|" \
+          f"{' '.join((f.get('body') or '').lower().split())[:160]}"
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
@@ -126,17 +128,18 @@ def findings_to_inline_comments(findings):
 
 # ---------------------------------------------------------------- summary + ledger
 
-def _finding_row(v, struck=False):
-    icon = _CAT_ICON.get(v.get("category"), "•")
-    sev = v.get("severity")
-    sev_md = f" _{sev}_" if sev in ("high", "medium", "low") else ""
+def _finding_row(v, resolved=False):
+    """One clean line: no per-line emoji. Section header carries the icon; severity stays as
+    text on open issues for quick triage. Resolved rows drop severity entirely."""
     loc = f"`{v.get('path')}:{v.get('line')}`" if v.get("line") is not None else f"`{v.get('path')}`"
-    if struck:
-        return f"- {icon} ~~{loc} — {v.get('body')}~~ ✅"
-    return f"- {icon}{sev_md} {loc} — {v.get('body')}"
+    if resolved:
+        return f"- {loc} — {v.get('body')}"
+    sev = v.get("severity")
+    sev_md = f"_{sev}_ " if sev in ("high", "medium", "low") else ""
+    return f"- {sev_md}{loc} — {v.get('body')}"
 
 
-def build_summary_md(review, findings_ledger, changed_files, sha_short):
+def build_summary_md(review, findings_ledger, changed_files, sha_short, current_sha=None, is_update=False):
     verdict = review.get("verdict", "minor_comments")
     open_all = [v for v in findings_ledger.values() if v.get("status") == "open"]
     fixed_all = [v for v in findings_ledger.values() if v.get("status") == "fixed"]
@@ -152,17 +155,16 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short):
     n_sug = len(sug_f) + len(free_sugg)
 
     # SUMMARY_MARKER is added at post time. No verdict label — the plain Summary leads (user feedback).
+    # The section counts (Potential Issues (N), Resolved (N)) already convey what changed, so we
+    # do not add a separate "since last review" line.
     lines = [INTRO, ""]
     if summary_pts:
         lines.append("## 📝 Summary")
         lines += [f"- {s}" for s in summary_pts]
         lines.append("")
-    if bugs or fixed_all:
+    if bugs:
         lines.append(f"## ⚠️ Potential Issues ({len(bugs)})")
-        for v in bugs:
-            lines.append(_finding_row(v))
-        for v in fixed_all[:20]:
-            lines.append(_finding_row(v, struck=True))
+        lines += [_finding_row(v) for v in bugs]
         lines.append("")
     if sec:
         lines.append(f"## 🔒 Security ({len(sec)})")
@@ -179,13 +181,29 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short):
         lines += [f"- {s}" for s in free_sugg[:5]]
         lines.append("\n</details>")
         lines.append("")
-    if changed_files:
-        lines.append(f"<details><summary>📁 Changed files ({len(changed_files)})</summary>\n")
-        lines += [f"- `{p}`" for p in changed_files[:50]]
+    # Resolved findings live in their own collapsed section (clean, not struck through inline).
+    if fixed_all:
+        lines.append(f"<details><summary>✅ Resolved ({len(fixed_all)})</summary>\n")
+        lines += [_finding_row(v, resolved=True) for v in fixed_all[:30]]
         lines.append("\n</details>")
         lines.append("")
+    # No "Changed files" list: GitHub's own Files-changed tab is authoritative, each finding already
+    # cites its file, and the prior list showed only files-with-findings (mislabeled). `changed_files`
+    # is kept in the signature for caller compatibility.
     lines.append(f"---\n_Reviewed at `{sha_short}` by [GitZoid](https://waveassist.io/assistants/gitzoid)._")
     return "\n".join(lines)
+
+
+def rekey_ledger(ledger):
+    """Re-key a stored findings ledger by the CURRENT finding_sig (recomputed from each entry's
+    category/path/body). Makes a finding_sig format change transparent across an upgrade: entries
+    keep matching the new run instead of all looking 'fixed' + re-posting as 'new'. Idempotent
+    when keys are already current; a no-op for empty/legacy entries with no findings ledger."""
+    out = {}
+    for entry in (ledger or {}).values():
+        if isinstance(entry, dict) and entry.get("body"):
+            out[finding_sig(entry)] = entry
+    return out
 
 
 def reconcile_ledger(prior_ledger, gated_findings, current_sha, is_update):
@@ -263,7 +281,8 @@ if should_process:
         current_sha = pr.get("current_sha", "")
         sha_short = current_sha[:7]
         entry = reviewed_prs.get(f"{repo_path}#{pr_number}", {})
-        prior_ledger = entry.get("findings", {})
+        # Re-key by the current finding_sig so a signature-format change across upgrades is transparent.
+        prior_ledger = rekey_ledger(entry.get("findings", {}))
         summary_comment_id = entry.get("summary_comment_id")
         if summary_comment_id is None and not preview:   # idempotent: reuse our marked comment, never duplicate
             summary_comment_id = find_summary_comment_id(repo_path, pr_number, access_token)
@@ -272,7 +291,8 @@ if should_process:
         is_update = bool(summary_comment_id)
         new_ledger, inline_comments = reconcile_ledger(prior_ledger, gated, current_sha, is_update=is_update)
         changed_files = sorted({f.get("path") for f in gated if f.get("path")})
-        summary_md = build_summary_md(review_dict, new_ledger, changed_files, sha_short)
+        summary_md = build_summary_md(review_dict, new_ledger, changed_files, sha_short,
+                                      current_sha=current_sha, is_update=is_update)
 
         if preview:
             display += (
