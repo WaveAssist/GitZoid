@@ -72,7 +72,7 @@ class TestFullWorkflow:
         ]
         
         # Mock LLM response
-        from generate_review import PRReviewResult
+        from generate_review import ReviewResult  # noqa: F401
         mock_llm_result = Mock()
         mock_llm_result.model_dump.return_value = {
             "summary": ["PR adds feature"],

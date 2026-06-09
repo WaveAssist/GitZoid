@@ -16,9 +16,18 @@ from fetch_pull_requests import (
     is_first_run_for_repo,
     is_bot_pr,
     is_old_pr,
+    is_draft_pr,
     build_pr_data,
     fetch_and_process_prs
 )
+
+
+def _paged(status=200, json_data=None, has_next=False):
+    r = Mock()
+    r.status_code = status
+    r.json.return_value = json_data if json_data is not None else {}
+    r.links = {"next": {"url": "p2"}} if has_next else {}
+    return r
 
 
 class TestFetchCompareDiff:
@@ -276,13 +285,15 @@ class TestBuildPRData:
             sample_pr_data,
             sample_pr_files,
             "full",
-            "abc123"
+            "abc123",
+            "owner/repo"
         )
-        
+
         assert result["pr_number"] == 123
         assert result["title"] == "Test Pull Request"
         assert result["review_type"] == "full"
         assert result["current_sha"] == "abc123"
+        assert result["id"] == "owner/repo"
         assert result["files"] == sample_pr_files
         assert "previous_sha" not in result
         assert "previous_review_text" not in result
@@ -294,10 +305,11 @@ class TestBuildPRData:
             sample_pr_files,
             "incremental",
             "new123",
+            "owner/repo",
             previous_sha="old123",
             previous_review_text="Previous review"
         )
-        
+
         assert result["review_type"] == "incremental"
         assert result["previous_sha"] == "old123"
         assert result["previous_review_text"] == "Previous review"
@@ -401,10 +413,10 @@ class TestFetchAndProcessPRs:
         # This is expected behavior - cleanup sets changed = True
         assert changed == True
     
-    @patch('fetch_pull_requests.fetch_compare_diff')
+    @patch('fetch_pull_requests.fetch_pr_files')
     @patch('fetch_pull_requests.requests.get')
-    def test_detects_new_commits(self, mock_get, mock_compare_diff):
-        """Test detecting new commits on reviewed PR."""
+    def test_detects_new_commits(self, mock_get, mock_fetch_files):
+        """Test detecting new commits on reviewed PR (re-review pulls the FULL PR, not the compare diff)."""
         from datetime import datetime, timezone
         recent_date = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         pr123 = {
@@ -422,8 +434,8 @@ class TestFetchAndProcessPRs:
         mock_response.json.return_value = [pr123]
         mock_get.return_value = mock_response
         
-        # Mock compare diff - must return non-empty list
-        mock_compare_diff.return_value = [{"filename": "test.py", "patch": "new diff", "status": "modified", "additions": 1, "deletions": 0}]
+        # Mock full PR files - must return non-empty list (re-review reviews the whole PR)
+        mock_fetch_files.return_value = [{"filename": "test.py", "patch": "new diff", "status": "modified", "additions": 1, "deletions": 0}]
         
         repo_metadata = {"id": "owner/repo"}
         access_token = "fake_token"
@@ -442,7 +454,7 @@ class TestFetchAndProcessPRs:
         assert prs[0]["review_type"] == "incremental"
         assert prs[0]["previous_sha"] == "old123"
         assert prs[0]["current_sha"] == "new456"
-        mock_compare_diff.assert_called_once()
+        mock_fetch_files.assert_called_once()
     
     @patch('fetch_pull_requests.fetch_pr_files')
     @patch('fetch_pull_requests.requests.get')
@@ -568,13 +580,65 @@ class TestFetchAndProcessPRs:
         mock_response.status_code = 200
         mock_response.json.side_effect = ValueError("Invalid JSON")
         mock_get.return_value = mock_response
-        
+
         repo_metadata = {"id": "owner/repo"}
         access_token = "fake_token"
         reviewed_prs = {}
-        
+
         prs, changed = fetch_and_process_prs(repo_metadata, access_token, reviewed_prs)
-        
+
         assert len(prs) == 0
         assert changed == False
+
+
+class TestIsDraftPR:
+    def test_draft_true(self):
+        assert is_draft_pr({"draft": True}) is True
+
+    def test_draft_false(self):
+        assert is_draft_pr({"draft": False}) is False
+
+    def test_draft_missing(self):
+        assert is_draft_pr({}) is False
+
+
+class TestPagination:
+    @patch('fetch_pull_requests.requests.get')
+    def test_fetch_pr_files_paginates(self, mock_get):
+        page1 = _paged(200, [{"filename": f"f{i}.py", "patch": "p", "additions": 1, "deletions": 0}
+                             for i in range(100)], has_next=True)
+        page2 = _paged(200, [{"filename": "f100.py", "patch": "p", "additions": 1, "deletions": 0}])
+        mock_get.side_effect = [page1, page2]
+        result = fetch_pr_files("owner/repo", 1, {})
+        assert len(result) == 101
+        assert mock_get.call_count == 2
+
+    @patch('fetch_pull_requests.requests.get')
+    def test_fetch_compare_diff_paginates(self, mock_get):
+        page1 = _paged(200, {"files": [{"filename": f"f{i}.py", "patch": "p"} for i in range(100)]},
+                       has_next=True)
+        page2 = _paged(200, {"files": [{"filename": "f100.py", "patch": "p"}]})
+        mock_get.side_effect = [page1, page2]
+        result = fetch_compare_diff("owner/repo", "b", "h", {})
+        assert len(result) == 101
+        assert mock_get.call_count == 2
+
+    @patch('fetch_pull_requests.requests.get')
+    def test_single_page_when_no_next(self, mock_get):
+        # a Mock response without a dict .links must NOT loop forever (defensive _has_next_page)
+        mock_get.return_value = _paged(200, [{"filename": "a.py", "patch": "p"}])
+        result = fetch_pr_files("owner/repo", 1, {})
+        assert len(result) == 1
+        assert mock_get.call_count == 1
+
+
+class TestBuildPRDataBrainProfile:
+    def test_attaches_brain_profile(self, sample_pr_data, sample_pr_files):
+        prof = {"architecture_summary": "x", "conventions": ["c"]}
+        r = build_pr_data(sample_pr_data, sample_pr_files, "full", "abc", "owner/repo", brain_profile=prof)
+        assert r["brain_profile"] == prof
+
+    def test_no_brain_profile_key_when_absent(self, sample_pr_data, sample_pr_files):
+        r = build_pr_data(sample_pr_data, sample_pr_files, "full", "abc", "owner/repo")
+        assert "brain_profile" not in r
 

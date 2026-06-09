@@ -29,6 +29,9 @@ env/
 .idea/
 *.swp
 
+# Local tooling (not part of the assistant)
+.superpowers/
+
 # OS files
 .DS_Store
 Thumbs.db

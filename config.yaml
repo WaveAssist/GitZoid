@@ -28,6 +28,18 @@ nodes:
     run_after:
       - generate_review
 
+  # The brain. Its own independent DAG (a second starting node, NOT chained to the review loop),
+  # on a weekly schedule. Builds/refreshes the per-repo profile (profile:{owner/repo}) and brain_html;
+  # the review nodes read the profile with safe defaults, so the 2-min loop is never coupled to it.
+  # Keep this disconnected (no run_after to/from the review nodes) — two starting nodes are only valid
+  # as two separate DAGs (exactly one starting node per connected subgraph).
+  - key: study_repos
+    name: StudyRepos
+    file_name: study_repos.py
+    starting_node: true
+    schedule:
+      cron: "0 3 * * 1"
+
 variables:
   - type: github
     name: github
@@ -38,37 +50,35 @@ variables:
     required_resources: ["repos"]
     helper_message: "Connect your GitHub account to the app"
     display_type: "base"
-    resource_properties:
-      - key: model_name
-        display_name: Model
-        type: select
-        is_optional: false
-        default_value: "anthropic/claude-haiku-4.5"
-        options:
-          - name: Claude Haiku 4.5
-            key: anthropic/claude-haiku-4.5
-          - name: Claude Sonnet 4.6
-            key: anthropic/claude-sonnet-4.6
-          - name: Claude Opus 4.6
-            key: anthropic/claude-opus-4.6
-          - name: Grok Code Fast 1
-            key: x-ai/grok-code-fast-1
-          - name: Gemini 3 Flash
-            key: google/gemini-3-flash-preview
-          - name: DeepSeek V3.2
-            key: deepseek/deepseek-v3.2
-          - name: Gemini 3.1 Pro
-            key: google/gemini-3.1-pro-preview
-          - name: GPT-5.2
-            key: openai/gpt-5.2
-          - name: Minimax M2.5
-            key: minimax/minimax-m2.5
-      - key: additional_context
-        display_name: Context
-        type: text
-        is_optional: true
-        default_value: ""
-        helper_message: "Review context specific to this repo"
+
+  # Single global model for ALL repos (not per-repo). Code reads `model_name` via fetch_data and
+  # falls back to the default if unset.
+  - name: model_name
+    key: model_name
+    display_name: Model
+    type: select
+    is_optional: true
+    default_value: "anthropic/claude-sonnet-4.6"
+    helper_message: "The AI model GitZoid uses to review every pull request"
+    options:
+      - name: Claude Haiku 4.5
+        key: anthropic/claude-haiku-4.5
+      - name: Claude Sonnet 4.6
+        key: anthropic/claude-sonnet-4.6
+      - name: Claude Opus 4.6
+        key: anthropic/claude-opus-4.6
+      - name: Grok Code Fast 1
+        key: x-ai/grok-code-fast-1
+      - name: Gemini 3 Flash
+        key: google/gemini-3-flash-preview
+      - name: DeepSeek V3.2
+        key: deepseek/deepseek-v3.2
+      - name: Gemini 3.1 Pro
+        key: google/gemini-3.1-pro-preview
+      - name: GPT-5.2
+        key: openai/gpt-5.2
+      - name: Minimax M2.5
+        key: minimax/minimax-m2.5
 
   - name: schedule
     key: schedule
