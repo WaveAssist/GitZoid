@@ -95,8 +95,8 @@ class Finding(BaseModel):
         description="high=likely bug/security/breakage; medium=correctness smell; low=nit")
     confidence: Literal["high", "medium", "low"] = Field(
         description="how sure this is real on this exact line")
-    category: Literal["bug", "security", "optimization", "suggestion"] = Field(
-        description="bug=correctness; security=secret/injection/authz; optimization=perf/readability; suggestion=nit/style")
+    category: Literal["bug", "security"] = Field(
+        description="bug=correctness; security=secret/injection/authz")
     body: str = Field(description="One or two PLAIN-ENGLISH sentences: the problem and its real-world impact, NOT code internals (no variable/function narration). Neutral, no praise, no alarm, no emojis.")
     suggested_replacement: Optional[str] = Field(default=None,
         description="ONLY for a mechanical single-line fix: exact replacement for `line`. Omit otherwise.")
@@ -210,7 +210,7 @@ _REVIEW_RULES = """
     You are a precise, senior code reviewer. Review ONLY the provided diff.
     Output findings as structured objects. Each finding MUST have severity, confidence, category.
     AUDIENCE & LANGUAGE (read this first — it matters most):
-    - Your reader is a busy tech lead reviewing a teammate's PR. They do NOT know this codebase's variables, functions, or internal layout. They need the PROBLEM and its real-world IMPACT in plain English, nothing more.
+    - Your reader is a busy tech lead reviewing a teammate's PR. They may NOT know this codebase's variables, functions, or internal layout. They need the PROBLEM and its real-world IMPACT in plain English, nothing more.
     - Write like you are telling a colleague in one sentence. Do NOT narrate code mechanics: no variable names, no "X is not in scope", no function-call chains, no "it re-fetches via Y". The engineer/AI will handle the fix; the reader only needs to grasp the problem and why it matters.
     - Name a specific function/file ONLY if essential to locate the issue, never as the explanation itself. (The line number already locates inline findings.)
     - BAD (too technical): "In submit_form_step_api, registration_array is not in scope at the call site, so check_join_booking_capacity re-fetches it with an extra DB round-trip."
@@ -219,11 +219,12 @@ _REVIEW_RULES = """
     PRECISION RULES (most important):
     - Only report something you can justify directly from the shown diff lines.
     - If unsure, lower confidence — do not omit it.
-    - Do NOT speculate about code you cannot see. Truncated files are fine; review what is visible.
+    - Do NOT speculate about code you cannot see. Truncated files may be present to optimise for tokens, thats ok. review what is visible.
     - Do NOT restate what the code does. Findings are actionable concerns or concrete improvements.
     - Neutral framing: describe issue + impact. No praise, no alarm, no emojis.
+    - Avoid ; and - and emdash as much as possible. but not forced. 
     SEVERITY: high=likely runtime bug/data loss/breakage/real security hole; medium=should fix (edge case, weak error handling, convention violation); low=minor/style.
-    CATEGORY: bug | security | optimization | suggestion. Use 'optimization' for perf/readability (valued — include them). Use 'security' only for the sweep items below.
+    CATEGORY (findings[] only): bug | security. Put perf/readability in potential_optimizations[] and nits/style in suggestions[], NOT as findings. Use 'security' only for the sweep items below.
     SUGGESTION: when a fix is small and unambiguous, include committable code in suggested_replacement; else omit.
     SECURITY SWEEP (light, high-confidence only):
     - Newly ADDED line that looks like a live secret (high-entropy token/key). Skip placeholders/test fixtures/examples.
@@ -342,7 +343,7 @@ def _sanitize_findings(findings):
             f["severity"] = "medium"
         if f.get("confidence") not in _CONF_RANK:
             f["confidence"] = "low"
-        if f.get("category") not in ("bug", "security", "optimization", "suggestion"):
+        if f.get("category") not in ("bug", "security"):
             f["category"] = "bug"
         if f.get("side") not in ("RIGHT", "LEFT"):
             f["side"] = "RIGHT"

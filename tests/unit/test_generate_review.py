@@ -209,9 +209,11 @@ class TestApplyGate:
         kept, _, _ = apply_gate([_F(severity="medium", confidence="high")], self.DL, severity_threshold="high")
         assert kept == []
 
-    def test_optimization_exempt_from_precision_gate(self):
+    def test_non_bug_security_category_coerced_and_gated(self):
+        # optimization/suggestion are no longer finding categories; a stray one is coerced to bug
+        # and must then pass the precision gate (low/low → dropped).
         kept, _, _ = apply_gate([_F(category="optimization", severity="low", confidence="low")], self.DL)
-        assert len(kept) == 1
+        assert kept == []
 
     def test_security_sorted_first(self):
         findings = [_F(category="bug", line=1), _F(category="security", line=2, body="secret")]
