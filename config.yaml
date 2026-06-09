@@ -7,14 +7,24 @@ requirements:
   - openai
 
 nodes:
-  - key: fetch_pull_requests
-    name: FetchPRs
-    file_name: fetch_pull_requests.py
+  # Single DAG, single starting node. The brain runs FIRST each cycle, then the review pipeline,
+  # so the review always sees a fresh per-repo profile (no brainless first review, one run in
+  # View Runs). study_repos self-throttles: it rebuilds the profile only every ~14 days and is a
+  # cheap no-op (no GitHub/LLM calls) on the other 2-min cycles.
+  - key: study_repos
+    name: StudyRepos
+    file_name: study_repos.py
     starting_node: true
     schedule:
       interval:
         every: 2
         period: minutes
+
+  - key: fetch_pull_requests
+    name: FetchPRs
+    file_name: fetch_pull_requests.py
+    run_after:
+      - study_repos
 
   - key: generate_review
     name: GenerateReview
@@ -27,18 +37,6 @@ nodes:
     file_name: post_comment.py
     run_after:
       - generate_review
-
-  # The brain. Its own independent DAG (a second starting node, NOT chained to the review loop),
-  # on a weekly schedule. Builds/refreshes the per-repo profile (profile:{owner/repo}) and brain_html;
-  # the review nodes read the profile with safe defaults, so the 2-min loop is never coupled to it.
-  # Keep this disconnected (no run_after to/from the review nodes) — two starting nodes are only valid
-  # as two separate DAGs (exactly one starting node per connected subgraph).
-  - key: study_repos
-    name: StudyRepos
-    file_name: study_repos.py
-    starting_node: true
-    schedule:
-      cron: "0 3 * * 1"
 
 variables:
   - type: github

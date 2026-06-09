@@ -67,32 +67,34 @@ class TestBranchSelection:
 
 class TestStalenessGate:
     def test_missing_rebuilds(self):
-        assert needs_rebuild({}, "abc") is True
+        assert needs_rebuild({}) is True
 
-    def test_moved_sha_rebuilds(self):
+    def test_sha_change_does_not_rebuild(self):
+        # Weekly refresh only — a branch SHA change does NOT trigger a rebuild while still fresh.
         existing = {"schema_version": "repo_context_profile_v2",
                     "_fingerprint": {"sha": "x", "built_at": datetime.now(timezone.utc).isoformat()}}
-        assert needs_rebuild(existing, "y") is True
+        assert needs_rebuild(existing) is False
 
     def test_old_schema_rebuilds(self):
-        assert needs_rebuild({"summary": "old proto-brain shape"}, "abc") is True
+        assert needs_rebuild({"summary": "old proto-brain shape"}) is True
 
     def test_v1_schema_rebuilds(self):
         # a v1 profile must be re-studied into the richer v2 schema (migration, not silent reuse)
         v1 = {"schema_version": "repo_context_profile_v1",
               "_fingerprint": {"sha": "abc", "built_at": datetime.now(timezone.utc).isoformat()}}
-        assert needs_rebuild(v1, "abc") is True
+        assert needs_rebuild(v1) is True
 
-    def test_fresh_skips(self):
+    def test_recent_profile_skips(self):
+        recent = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
         existing = {"schema_version": "repo_context_profile_v2",
-                    "_fingerprint": {"sha": "abc", "built_at": datetime.now(timezone.utc).isoformat()}}
-        assert needs_rebuild(existing, "abc") is False
+                    "_fingerprint": {"sha": "abc", "built_at": recent}}
+        assert needs_rebuild(existing) is False
 
     def test_ttl_expired_rebuilds(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
         existing = {"schema_version": "repo_context_profile_v2",
                     "_fingerprint": {"sha": "abc", "built_at": old}}
-        assert needs_rebuild(existing, "abc") is True
+        assert needs_rebuild(existing) is True
 
 
 class TestKeyFilePicker:

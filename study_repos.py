@@ -27,7 +27,7 @@ GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.2
 STALE_BRANCH_LEAD_DAYS = 14
-PROFILE_TTL_DAYS = 14
+PROFILE_TTL_DAYS = 14                # brain refreshes every 14 days (time-based, not on SHA change)
 TREE_BLOB_CAP = 800
 FILE_CHAR_CAP = 10000
 MAX_ACTIVE_BRANCH_SCAN = 10          # cap branch date lookups (rate-limit care)
@@ -401,15 +401,17 @@ def render_brain_html(profiles):
 
 # ---------------------------------------------------------------- staleness gate
 
-def needs_rebuild(existing, chosen_sha):
+def needs_rebuild(existing):
+    """Time-based refresh (every PROFILE_TTL_DAYS). Rebuild only if the profile is missing, on an
+    old schema, or older than the TTL. Deliberately does NOT rebuild on branch SHA changes — the
+    brain is a coarse repo profile refreshed on a fixed cadence, not per commit. The rebuild is a
+    full fresh regeneration (no diff against the old profile). Checked from the stored profile alone
+    (no GitHub call), so it's a cheap no-op when the profile is still fresh."""
     if not existing:
         return True
     if existing.get("schema_version") != "repo_context_profile_v2":
         return True
-    fp = existing.get("_fingerprint", {})
-    if fp.get("sha") != chosen_sha:
-        return True
-    built = fp.get("built_at")
+    built = existing.get("_fingerprint", {}).get("built_at")
     if not built:
         return True
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(built.replace("Z", "+00:00"))).days
@@ -431,17 +433,20 @@ for repo in repositories:
     if not repo_path:
         continue
     repo_paths.append(repo_path)
+
+    # Cheap freshness check FIRST, from the stored profile alone — no GitHub call when the
+    # weekly profile is still fresh, so this node is a fast no-op on most 2-min cycles.
+    existing = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
+    if not needs_rebuild(existing):
+        print(f"✓ {repo_path} profile fresh; skip")
+        continue
+
     override = (repo.get("properties", {}) or {}).get("branch", "") if isinstance(repo, dict) else ""
 
     try:
         chosen = select_canonical_branch(repo_path, headers, override=override)
         if not chosen.get("sha"):
             print(f"⚠️ no canonical branch for {repo_path}; skipping")
-            continue
-
-        existing = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
-        if not needs_rebuild(existing, chosen["sha"]):
-            print(f"✓ {repo_path} profile fresh ({chosen['sha'][:8]}); skip")
             continue
 
         file_list, truncated = get_branch_tree(repo_path, chosen["branch"], headers)
