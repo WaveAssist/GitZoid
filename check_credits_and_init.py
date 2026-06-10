@@ -93,7 +93,7 @@ if lock_is_active(existing_lock):
     print("GitZoid: previous run still in progress; skipping this cycle.")
     waveassist.store_data("skip_run", True, run_based=True, data_type="json")
     display_output = {
-        "html_content": "<p>A previous GitZoid run is still in progress; this cycle was skipped.</p>",
+        "html_content": "<p>GitZoid is already reviewing your pull requests. This run will be skipped.</p>",
     }
     waveassist.store_data("display_output", display_output, run_based=True, data_type="json")
 else:
