@@ -7,18 +7,26 @@ requirements:
   - openai
 
 nodes:
-  # Single DAG, single starting node. The brain runs FIRST each cycle, then the review pipeline,
-  # so the review always sees a fresh per-repo profile (no brainless first review, one run in
-  # View Runs). study_repos self-throttles: it rebuilds the profile only every ~14 days and is a
-  # cheap no-op (no GitHub/LLM calls) on the other 2-min cycles.
-  - key: study_repos
-    name: StudyRepos
-    file_name: study_repos.py
+  # Single DAG, single starting node (house pattern, like GitDigest/WaveContent). The cheap
+  # credit+init gate runs FIRST — before the expensive brain build — then the brain, then the
+  # review pipeline. So credits are checked once up front, the progress bar shows from second 0,
+  # the review always sees a fresh per-repo profile (no brainless first review), and there is one
+  # run in View Runs. study_repos self-throttles: it rebuilds the profile only every ~14 days and
+  # is a cheap no-op (no GitHub/LLM calls) on the other 2-min cycles.
+  - key: check_credits_and_init
+    name: CheckCreditsAndInit
+    file_name: check_credits_and_init.py
     starting_node: true
     schedule:
       interval:
         every: 2
         period: minutes
+
+  - key: study_repos
+    name: StudyRepos
+    file_name: study_repos.py
+    run_after:
+      - check_credits_and_init
 
   - key: fetch_pull_requests
     name: FetchPRs

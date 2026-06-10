@@ -6,9 +6,10 @@ slice of the codebase, and distills a durable `repo_context_profile_v2` profile 
 the additive key  profile:{owner/repo}.  Downstream nodes (fetch_pull_requests, generate_review)
 read that profile to make reviews and security checks repo-aware.
 
-Conventions: flat script, no __main__ guard, no sibling-node imports. Credits are gated once via
-init(check_credits=True) (mirrors generate_review). The driver falls through on empty/missing
-input — it never calls exit()/SystemExit (which would leave the run STARTED).
+Conventions: flat script, no __main__ guard, no sibling-node imports. Credits are gated once
+upstream in check_credits_and_init (the single starting node), so this node just init()s. The
+driver falls through on empty/missing input — it never calls exit()/SystemExit (which would
+leave the run STARTED).
 """
 import time
 import base64
@@ -19,7 +20,7 @@ import requests
 from pydantic import BaseModel, Field
 import waveassist
 
-waveassist.init(check_credits=True)   # single credit gate (matches generate_review/post_comment)
+waveassist.init()   # credits already gated upstream in check_credits_and_init
 
 print("Processing GitZoid brain build (study_repos) node")
 
