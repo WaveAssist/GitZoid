@@ -291,8 +291,11 @@ def call_llm_with_retry(model, prompt, response_model, attempts=2, sleep_s=2):
     last = None
     for i in range(attempts):
         try:
+            # Explicit cap: without it OpenRouter pre-authorizes the model's full output
+            # ceiling (64k for Sonnet) against the key's credit limit and 402s near the cap.
             return waveassist.call_llm(model=model, prompt=prompt,
-                                       response_model=response_model, should_retry=True)
+                                       response_model=response_model, should_retry=True,
+                                       max_tokens=8000)
         except Exception as e:
             last = e
             print(f"⚠️ call_llm attempt {i + 1}/{attempts} failed: {e}")
