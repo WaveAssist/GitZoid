@@ -65,6 +65,27 @@ class TestBranchSelection:
         assert len(list_branches("o/r", {})) == 101
 
 
+class TestSkipRunNoOp:
+    """When skip_run is set (overlapping cycle), the brain builder must not rebuild AND must not
+    clobber the stored repo_groups / brain_html with empty data."""
+
+    def test_skip_run_does_not_store(self, monkeypatch):
+        import runpy, waveassist
+        fetch_map = {"skip_run": True, "github_selected_resources": [{"id": "owner/repo"}],
+                     "github_access_token": "tok"}
+        stored = {}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data",
+                            lambda key, value, **k: stored.__setitem__(key, value))
+        import requests
+        monkeypatch.setattr(requests, "get",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no GitHub call on skip")))
+        runpy.run_path("study_repos.py", run_name="__main__")
+        assert "repo_groups" not in stored
+        assert "brain_html" not in stored
+
+
 class TestStalenessGate:
     def test_missing_rebuilds(self):
         assert needs_rebuild({}) is True

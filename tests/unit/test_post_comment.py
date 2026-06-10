@@ -8,6 +8,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
+import post_comment
 from post_comment import (
     finding_sig,
     findings_to_inline_comments,
@@ -19,6 +20,7 @@ from post_comment import (
     create_summary_comment,
     edit_summary_comment,
     find_summary_comment_id,
+    release_run_lock,
     SUMMARY_MARKER,
 )
 
@@ -210,3 +212,32 @@ class TestRestSequences:
     def test_find_summary_none(self, mock_get):
         mock_get.return_value = _resp(200, [{"id": 1, "body": "no marker"}])
         assert find_summary_comment_id("o/r", 1, "tok") is None
+
+
+class TestReleaseRunLock:
+    """The last node releases the single-run lock only if THIS run owns it (token match)."""
+
+    def _wa(self, fetch_map):
+        wa = Mock()
+        wa.fetch_data.side_effect = lambda key=None, default=None, **k: fetch_map.get(key, default)
+        wa.store_data.return_value = True
+        return wa
+
+    def test_releases_when_token_matches(self):
+        wa = self._wa({"run_lock_token": "T1", "run_lock": {"at": "now", "token": "T1"}})
+        with patch.object(post_comment, "waveassist", wa):
+            release_run_lock()
+        wa.store_data.assert_called_once_with("run_lock", {}, data_type="json")
+
+    def test_skip_cycle_without_token_does_not_release(self):
+        # A lock-skipped cycle has no run_lock_token, so it must never clear the active run's lock.
+        wa = self._wa({"run_lock_token": "", "run_lock": {"at": "now", "token": "T1"}})
+        with patch.object(post_comment, "waveassist", wa):
+            release_run_lock()
+        wa.store_data.assert_not_called()
+
+    def test_does_not_release_another_runs_lock(self):
+        wa = self._wa({"run_lock_token": "MINE", "run_lock": {"at": "now", "token": "OTHER"}})
+        with patch.object(post_comment, "waveassist", wa):
+            release_run_lock()
+        wa.store_data.assert_not_called()
