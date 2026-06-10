@@ -14,7 +14,7 @@ import requests
 import waveassist
 from datetime import datetime, timezone
 
-waveassist.init(check_credits=True)
+waveassist.init()   # credits gated once upstream in check_credits_and_init
 
 SUMMARY_MARKER = "<!-- gitzoid:summary -->"
 VERDICT_HEAD = {

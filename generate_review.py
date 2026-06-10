@@ -21,7 +21,7 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 _SEV_RANK = {"high": 0, "medium": 1, "low": 2}
 _CONF_RANK = {"high": 0, "medium": 1, "low": 2}
 
-waveassist.init(check_credits=True)
+waveassist.init()   # credits gated once upstream in check_credits_and_init
 
 print("Processing AI Review Generation node")
 

@@ -3,19 +3,12 @@ import requests
 import waveassist
 
 FIRST_RUN_LIMIT = 2
-MINIMUM_CREDITS_REQUIRED = 0.1
-# Runs UI: estimated seconds per PR for downstream generate_review + post_comment.
+# Runs UI: estimated seconds per PR for downstream generate_review + post_comment. This refines
+# the upfront estimate set by check_credits_and_init once the real open-PR count is known.
 PROCESSING_TIME_PER_PR = 2
 
+# Credits are gated once upstream in check_credits_and_init (the single starting node).
 waveassist.init()
-
-success = waveassist.check_credits_and_notify(MINIMUM_CREDITS_REQUIRED, "GitZoid")
-if not success:
-    display_output = {
-        "html_content": "<p>Credits were not available, the run was skipped.</p>",
-    }
-    waveassist.store_data("display_output", display_output, run_based=True)
-    raise Exception("Credits were not available, the run was skipped.")
 
 
 def _has_next_page(resp) -> bool:
