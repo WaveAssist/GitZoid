@@ -11,7 +11,7 @@ Usage:
 
     REPO     owner/repo to build (default: the first connected repo). Ignored with --all.
     --all    build every connected repo (default: just one).
-    --write  actually persist profile:{repo} / repo_groups / brain_html to the project.
+    --write  actually persist profile:{repo} / repo_groups / brain to the project.
              Without --write it is a DRY RUN: profiles are printed, nothing is stored.
 
 Credentials are read from the environment (uid, project_key) — never hardcoded here.

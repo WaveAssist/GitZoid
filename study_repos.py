@@ -13,7 +13,6 @@ leave the run STARTED).
 """
 import time
 import base64
-import html as _html
 from datetime import datetime, timezone
 from typing import List, Literal
 import requests
@@ -32,7 +31,6 @@ PROFILE_TTL_DAYS = 14                # brain refreshes every 14 days (time-based
 TREE_BLOB_CAP = 800
 FILE_CHAR_CAP = 10000
 MAX_ACTIVE_BRANCH_SCAN = 10          # cap branch date lookups (rate-limit care)
-BRAND = "#1ED66C"
 # The brain is rare (weekly) + quality-critical, so it uses a strong model decoupled from the
 # cheaper per-PR review model. Optional override via the "brain_model" data key.
 BRAIN_MODEL = "anthropic/claude-sonnet-4.6"
@@ -335,71 +333,6 @@ def store_profile(wa, repo_path, profile_dict):
     wa.store_data(f"profile:{repo_path}", profile_dict, data_type="json")
 
 
-# ---------------------------------------------------------------- brain_html render
-
-def _esc(v):
-    return _html.escape(str(v if v is not None else ""))
-
-
-def render_brain_html(profiles):
-    cards = []
-    for repo, p in profiles.items():
-        if not isinstance(p, dict) or p.get("schema_version") != "repo_context_profile_v2":
-            continue
-        sec = p.get("security") or {}
-        routes = sec.get("routes") or []
-        deps = p.get("dependencies") or []
-        open_routes = [r for r in routes if r.get("unauthenticated")]
-        deps_auth = [d for d in deps if d.get("in_auth_path")]
-        stk = p.get("stack") or {}
-        tech = ((stk.get("languages") or []) + (stk.get("frameworks") or [])
-                + (stk.get("datastores") or []) + (stk.get("infrastructure") or []))
-        tech_html = "".join(f"<span class='tech'>{_esc(t)}</span>" for t in tech[:16])
-        kf_html = "".join(
-            f"<li><code>{_esc(k.get('path'))}</code> — {_esc(k.get('role'))}</li>"
-            for k in (p.get("key_files") or [])[:10])
-        comp_html = "".join(
-            f"<li><b>{_esc(c.get('name'))}</b> — {_esc(c.get('responsibility'))}</li>"
-            for c in (p.get("components") or [])[:8])
-        conv = "".join(f"<li>{_esc(c)}</li>" for c in (p.get("conventions") or [])[:8])
-        routes_html = "".join(
-            f"<li>{_esc(r.get('route'))} <span class='badge {'open' if r.get('unauthenticated') else 'auth'}'>"
-            f"{'PUBLIC' if r.get('unauthenticated') else 'auth'}</span></li>" for r in routes[:12])
-        fp = p.get("_fingerprint") or {}
-        cards.append(f"""<div class="card">
-          <h3>{_esc(repo)} <span class="branch">{_esc(fp.get('branch', ''))}</span></h3>
-          <p class="summary">{_esc(p.get('architecture_summary', ''))}</p>
-          <div class="tech-row">{tech_html or '<span class=muted>stack not detected</span>'}</div>
-          <div class="stat-row">
-            <span class="stat"><b>{len(deps)}</b> deps</span>
-            <span class="stat"><b>{len(deps_auth)}</b> in auth path</span>
-            <span class="stat"><b>{len(open_routes)}</b> public routes</span>
-            <span class="stat"><b>{len(sec.get('secret_locations') or [])}</b> secret sites</span></div>
-          <h4>Key files</h4><ul class="kf">{kf_html or '<li class=muted>None.</li>'}</ul>
-          <h4>Components</h4><ul>{comp_html or '<li class=muted>None.</li>'}</ul>
-          <h4>Conventions</h4><ul>{conv or '<li class=muted>None recorded.</li>'}</ul>
-          <h4>Routes</h4><ul class="routes">{routes_html or '<li class=muted>None.</li>'}</ul>
-          <p class="fp muted">fingerprint {_esc(fp.get('sha', ''))[:10]} · built {_esc(fp.get('built_at', ''))}</p>
-        </div>""")
-    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-      body{{font-family:Inter,-apple-system,Arial,sans-serif;color:#0f172a;margin:18px;background:#f9fafb}}
-      .wrap{{max-width:760px;margin:0 auto}}
-      .header{{border-top:4px solid {BRAND};background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:16px}}
-      .card{{background:#fff;border:1px solid #e5e7eb;border-left:3px solid {BRAND};border-radius:12px;padding:14px;margin:12px 0}}
-      h3 .branch{{font-size:12px;color:{BRAND};background:#eafff3;padding:2px 8px;border-radius:10px;margin-left:6px}}
-      .tech-row{{margin:8px 0 4px}} .tech{{display:inline-block;font-size:11px;background:#eef2f6;color:#334155;border:1px solid #dbe2ea;border-radius:999px;padding:2px 9px;margin:0 5px 5px 0}}
-      .stat-row{{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}} .stat b{{color:{BRAND}}}
-      .badge.open{{color:#b91c1c;font-weight:700}} .badge.auth{{color:#16794a}}
-      code{{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#f3f4f6;padding:1px 5px;border-radius:5px;color:#0b3d24}}
-      h4{{margin:12px 0 4px;font-size:13px;color:#0f1116}}
-      .muted{{color:#94a3b8}} ul{{margin:6px 0 12px 18px}} li{{margin:3px 0}} .fp{{font-size:11px}}
-    </style></head><body><div class="wrap">
-      <div class="header"><h1 style="margin:0;color:#0f1116">Repository Brain</h1>
-      <p class="muted" style="margin:4px 0 0">{len(profiles)} repositories profiled · GitZoid</p></div>
-      {''.join(cards) or '<p class=muted>No profiles yet.</p>'}
-    </div></body></html>"""
-
-
 # ---------------------------------------------------------------- staleness gate
 
 def needs_rebuild(existing):
@@ -423,7 +356,7 @@ def needs_rebuild(existing):
 
 # Single-run lock (set by check_credits_and_init): if another run holds it, this cycle is a no-op.
 # Empty repo list short-circuits the loop AND the post-loop stores below, so we never clobber the
-# existing repo_groups / brain_html.
+# existing repo_groups / brain.
 skip_run = bool(waveassist.fetch_data("skip_run", default=False))
 if skip_run:
     print("GitZoid: skip_run set; study_repos no-op (another run in progress).")
@@ -486,4 +419,18 @@ for repo in repositories:
 if not skip_run:
     waveassist.store_data("repo_groups", repo_groups, data_type="json")
     all_profiles = {r: (waveassist.fetch_data(f"profile:{r}", default={}) or {}) for r in repo_paths}
-    waveassist.store_data("brain_html", render_brain_html(all_profiles), data_type="string")
+    # Structured payload the dashboard Knowledge tab renders natively (one fetch, dark-theme
+    # React UI). Order-preserving; only well-formed v2 profiles are included.
+    brain_repos = [
+        {"repo": r, "profile": all_profiles[r]}
+        for r in repo_paths
+        if isinstance(all_profiles.get(r), dict)
+        and all_profiles[r].get("schema_version") == "repo_context_profile_v2"
+    ]
+    built_ats = [b["profile"].get("_fingerprint", {}).get("built_at", "") for b in brain_repos]
+    waveassist.store_data("brain", {
+        "schema_version": "brain_v1",
+        "count": len(brain_repos),
+        "built_at": max([b for b in built_ats if b], default=""),
+        "repos": brain_repos,
+    }, data_type="json")
