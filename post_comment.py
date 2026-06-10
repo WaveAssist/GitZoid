@@ -343,3 +343,20 @@ if should_process:
         waveassist.store_data("pull_requests", [], data_type="json")
     waveassist.store_data("display_output", {"html_content": display}, run_based=True, data_type="json")
     print(f"✅ post_comment done (preview={preview}, posted={len(posted_links)}).")
+
+
+def release_run_lock():
+    """Release the single-run lock acquired by check_credits_and_init — but only if THIS run owns
+    it (token match), so an overlapping/skipped cycle can never free another run's lock. As the
+    last node in the DAG, reaching here means the run is done; a crashed run leaves the lock to
+    expire via its TTL instead."""
+    my_token = waveassist.fetch_data("run_lock_token", default="") or ""
+    if not my_token:
+        return  # this cycle was a lock-skip (or no token) — nothing to release
+    lock = waveassist.fetch_data("run_lock", default={}) or {}
+    if isinstance(lock, dict) and lock.get("token") == my_token:
+        waveassist.store_data("run_lock", {}, data_type="json")
+        print("GitZoid: released run lock.")
+
+
+release_run_lock()

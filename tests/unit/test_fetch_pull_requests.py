@@ -30,6 +30,28 @@ def _paged(status=200, json_data=None, has_next=False):
     return r
 
 
+class TestSkipRunNoOp:
+    """When check_credits_and_init set skip_run (an overlapping cycle), the driver must be a no-op:
+    no GitHub calls, and it must NOT store pull_requests (so downstream nodes no-op too)."""
+
+    def test_skip_run_does_no_work(self, monkeypatch):
+        import runpy, waveassist
+        fetch_map = {"skip_run": True, "github_selected_resources": [{"id": "owner/repo"}],
+                     "github_access_token": "tok", "reviewed_prs": {}}
+        stored = {}
+        called = {"get": 0}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data",
+                            lambda key, value, **k: stored.__setitem__(key, value))
+        import requests
+        monkeypatch.setattr(requests, "get",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no GitHub call on skip")))
+        runpy.run_path("fetch_pull_requests.py", run_name="__main__")
+        assert "pull_requests" not in stored   # nothing queued for review
+        assert called["get"] == 0
+
+
 class TestFetchCompareDiff:
     """Tests for fetch_compare_diff function."""
     

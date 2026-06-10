@@ -338,8 +338,14 @@ def fetch_and_process_prs(
     return prs_to_review, reviewed_prs_changed
 
 
+# Single-run lock (set by check_credits_and_init): if another run holds it, no-op (empty repo list
+# means no PRs are queued, so generate_review / post_comment downstream also no-op).
+skip_run = bool(waveassist.fetch_data("skip_run", default=False))
+if skip_run:
+    print("GitZoid: skip_run set; fetch_pull_requests no-op (another run in progress).")
+
 # Fetch input from WaveAssist
-repositories = waveassist.fetch_data("github_selected_resources") or []
+repositories = [] if skip_run else (waveassist.fetch_data("github_selected_resources") or [])
 access_token = waveassist.fetch_data("github_access_token") or ""
 
 # Fetch existing reviewed PRs tracker

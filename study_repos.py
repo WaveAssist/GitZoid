@@ -421,7 +421,14 @@ def needs_rebuild(existing):
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
-repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
+# Single-run lock (set by check_credits_and_init): if another run holds it, this cycle is a no-op.
+# Empty repo list short-circuits the loop AND the post-loop stores below, so we never clobber the
+# existing repo_groups / brain_html.
+skip_run = bool(waveassist.fetch_data("skip_run", default=False))
+if skip_run:
+    print("GitZoid: skip_run set; study_repos no-op (another run in progress).")
+
+repositories = [] if skip_run else (waveassist.fetch_data("github_selected_resources", default=[]) or [])
 access_token = waveassist.fetch_data("github_access_token", default="") or ""
 model_name = waveassist.fetch_data("brain_model", default=BRAIN_MODEL)
 headers = {"Authorization": f"token {access_token}", "Accept": "application/vnd.github+json"}
@@ -476,6 +483,7 @@ for repo in repositories:
         print(f"⚠️ failed to build profile for {repo_path}: {e}; skipping")
         continue
 
-waveassist.store_data("repo_groups", repo_groups, data_type="json")
-all_profiles = {r: (waveassist.fetch_data(f"profile:{r}", default={}) or {}) for r in repo_paths}
-waveassist.store_data("brain_html", render_brain_html(all_profiles), data_type="string")
+if not skip_run:
+    waveassist.store_data("repo_groups", repo_groups, data_type="json")
+    all_profiles = {r: (waveassist.fetch_data(f"profile:{r}", default={}) or {}) for r in repo_paths}
+    waveassist.store_data("brain_html", render_brain_html(all_profiles), data_type="string")
