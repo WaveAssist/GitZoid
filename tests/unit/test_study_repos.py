@@ -15,7 +15,6 @@ from study_repos import (
     list_branches,
     needs_rebuild,
     pick_key_files,
-    render_brain_html,
     _sanitize_profile,
     store_profile,
     get_branch_tree,
@@ -67,7 +66,7 @@ class TestBranchSelection:
 
 class TestSkipRunNoOp:
     """When skip_run is set (overlapping cycle), the brain builder must not rebuild AND must not
-    clobber the stored repo_groups / brain_html with empty data."""
+    clobber the stored repo_groups / brain with empty data."""
 
     def test_skip_run_does_not_store(self, monkeypatch):
         import runpy, waveassist
@@ -83,7 +82,7 @@ class TestSkipRunNoOp:
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("no GitHub call on skip")))
         runpy.run_path("study_repos.py", run_name="__main__")
         assert "repo_groups" not in stored
-        assert "brain_html" not in stored
+        assert "brain" not in stored
 
 
 class TestStalenessGate:
@@ -152,32 +151,6 @@ class TestSanitizer:
         assert p["stack"]["frameworks"] == []
         assert p["components"] == []
         assert p["key_files"] == []
-
-
-class TestBrainHtml:
-    def test_renders_and_flags_public(self):
-        prof = {"schema_version": "repo_context_profile_v2",
-                "architecture_summary": "A Flask API.",
-                "conventions": ["snake_case"],
-                "stack": {"languages": ["Python"], "frameworks": ["Flask"],
-                          "datastores": ["PostgreSQL"], "infrastructure": [],
-                          "package_managers": ["pip"]},
-                "components": [{"name": "auth", "responsibility": "login + JWT"}],
-                "key_files": [{"path": "app/auth.py", "role": "JWT signing and verification"}],
-                "dependencies": [{"name": "pyjwt", "in_auth_path": True}],
-                "security": {"routes": [{"route": "POST /login", "unauthenticated": True}],
-                             "secret_locations": [".env"]},
-                "_fingerprint": {"sha": "abc123def4", "branch": "main",
-                                 "built_at": "2026-06-01T00:00:00+00:00"}}
-        h = render_brain_html({"o/r": prof})
-        assert "o/r" in h
-        assert "PUBLIC" in h
-        assert "#1ED66C" in h
-        assert "Flask" in h           # stack rendered
-        assert "app/auth.py" in h     # key file rendered
-
-    def test_ignores_old_schema(self):
-        assert "No profiles yet." in render_brain_html({"o/r": {"summary": "old"}})
 
 
 class TestProfileModel:
