@@ -67,10 +67,10 @@ variables:
     default_value: "anthropic/claude-sonnet-4.6"
     helper_message: "The AI model GitZoid uses to review every pull request"
     options:
-      - name: Claude Haiku 4.5
-        key: anthropic/claude-haiku-4.5
       - name: Claude Sonnet 4.6
         key: anthropic/claude-sonnet-4.6
+      - name: Claude Haiku 4.5
+        key: anthropic/claude-haiku-4.5
       - name: Claude Opus 4.6
         key: anthropic/claude-opus-4.6
       - name: Grok Code Fast 1
