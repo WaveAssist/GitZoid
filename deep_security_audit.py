@@ -5,10 +5,13 @@ It lives in the daily Security chain but only does work for a repo once every 7 
 (self-throttled via `security_audit_state`, the study_repos pattern), processing repos
 oldest-audited-first within a time budget so it never brushes the broker window.
 
-For each due repo it fetches ONLY the security-critical files (auth-ish key files, secret
-locations) plus the files the per-PR tripwire queued (`security_audit_queue`), and asks the
-configured model to find the class no scanner can: bypassable auth / broken access control,
-backdoor-ish code, and live secrets. A finding survives ONLY if it carries a concrete
+For each due repo it builds a SCOPE by gathering a broad candidate pool — deterministic security
+discovery over the repo tree (path keywords) + the brain's key files/secret locations + the PR
+tripwire queue — then ranks every file by security risk (changed-since-last-audit boosted) and
+greedily packs the top files into a ~100K-token budget. The brain is one signal among many, so a
+noisy brain run can't blank the scope (the old failure mode). It then asks the configured model to
+find the class no scanner can: bypassable auth / broken access control, backdoor-ish code, and live
+secrets. A finding survives ONLY if it carries a concrete
 {entry point → exploit path → named victim → fix} (authz), a real non-placeholder secret, or
 concrete backdoor signals — at high confidence. Survivors are appended to the run-based
 `security_candidates` key for triage_and_alert; the audit never emails directly.
@@ -33,16 +36,36 @@ HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.15
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 AUDIT_TTL_DAYS = 7
-MAX_FILES_PER_REPO = 20
-FILE_CHAR_CAP = 12000
 MAX_AUDIT_TOKENS = 4096
 RUN_TIME_BUDGET_SECONDS = 1200      # ~20 min: overflow repos resume next daily tick
 
-_AUTH_HINTS = ("auth", "login", "session", "security", "middleware", "token", "jwt", "oauth",
-               "permission", "credential", "password", "access", "role", "admin", "reset", "otp")
+# Scope budget: gather a broad, deterministically-discovered candidate pool, rank by security risk,
+# then greedily pack the top files into a token budget. The brain is ONE signal among many (path
+# discovery + changed-since-last-audit + tripwire + secrets), so a noisy brain run can't blank the
+# scope. Start conservative; these are the main cost/coverage levers.
+TOKEN_BUDGET = 100_000              # ~100K input tokens of security-dense code per repo / week
+PER_FILE_CHAR_CAP = 18_000          # cap one file so a giant file can't eat the budget (~4.5K tokens)
+MAX_FILES = 40                      # sanity bound on file count
+CHARS_PER_TOKEN = 4                 # rough token estimate from char length
+TREE_BLOB_CAP = 4000               # cap on tree entries scanned (rate-limit care)
+
+# Security path keywords → weight. Strong access-control terms outrank generic ones, so the ranker
+# puts the real authz/secret files first.
+SECURITY_PATH_WEIGHTS = {
+    "auth": 5, "login": 5, "permission": 5, "rbac": 5, "authz": 5, "access": 5, "session": 4,
+    "middleware": 4, "token": 4, "jwt": 4, "oauth": 4, "admin": 4, "credential": 4, "password": 4,
+    "crypto": 4, "secret": 4, "security": 4, "otp": 4, "reset": 3, "webhook": 3, "payment": 3,
+    "billing": 3, "route": 2, "router": 2, "api": 2, "endpoint": 2, "handler": 2, "view": 2,
+    "controller": 2, "config": 2, "settings": 2,
+}
+CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".go", ".rb", ".java", ".php", ".cs",
+             ".rs", ".kt", ".scala", ".c", ".cc", ".cpp", ".h")
+EXCLUDE_SUBSTR = ("test", "spec", "node_modules", "vendor", "dist", "/build/", ".venv", "site-packages",
+                  "migrations", "__mocks__", ".min.", "generated", ".d.ts", "fixture", "mock", "/docs/",
+                  "example", "sample")
 
 
-# ---------------------------------------------------------------- throttle + scope
+# ---------------------------------------------------------------- throttle
 
 def needs_audit(state_entry, now=None, ttl_days=AUDIT_TTL_DAYS) -> bool:
     """A repo is due if never audited or its last audit is older than the TTL."""
@@ -56,33 +79,77 @@ def needs_audit(state_entry, now=None, ttl_days=AUDIT_TTL_DAYS) -> bool:
     return age >= ttl_days
 
 
-def _is_security_relevant(path, role=""):
-    blob = f"{path} {role}".lower()
-    return any(h in blob for h in _AUTH_HINTS)
+# ---------------------------------------------------------------- scope: gather → rank → pack
+
+def is_code_file(path: str) -> bool:
+    """A source file worth auditing: a code extension, not a test/vendor/generated/doc file."""
+    p = (path or "").lower()
+    if not p.endswith(CODE_EXTS):
+        return False
+    return not any(s in p for s in EXCLUDE_SUBSTR)
 
 
-def select_audit_files(brain_profile, queue_files, cap=MAX_FILES_PER_REPO):
-    """Pick the files worth deep-reading: auth-ish key files + secret locations that look like files
-    + everything the PR tripwire queued. Deduped, capped. Queue files are highest priority."""
-    ordered = []
-    for p in (queue_files or []):
-        if p:
-            ordered.append(p)
-    for kf in ((brain_profile or {}).get("key_files") or []):
-        path = kf.get("path") or ""
-        if path and _is_security_relevant(path, kf.get("role", "")):
-            ordered.append(path)
-    for loc in (((brain_profile or {}).get("security") or {}).get("secret_locations") or []):
-        if loc and ("/" in loc or "." in loc):
-            ordered.append(loc)
-    seen, out = set(), []
-    for p in ordered:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-        if len(out) >= cap:
-            break
-    return out
+def path_security_score(path: str) -> int:
+    """Sum the weights of every security keyword present in the path (0 = not security-relevant)."""
+    p = (path or "").lower()
+    return sum(w for kw, w in SECURITY_PATH_WEIGHTS.items() if kw in p)
+
+
+def gather_candidates(tree_paths, brain_profile, changed_files, queue_files):
+    """Build the ranked candidate pool. A file QUALIFIES if it has a security-keyword path, is a brain
+    key file, is a declared secret location, or was queued by the PR tripwire. 'changed since last
+    audit' is a ranking BOOST on qualified files (so we audit relevant changes first) — a changed file
+    with no security signal is NOT pulled in. Returns [{path, score, changed, queued}] sorted desc."""
+    brain = brain_profile or {}
+    changed = {p for p in (changed_files or []) if p}
+    queued = {p for p in (queue_files or []) if p}
+    key_files = {(kf.get("path") or "") for kf in (brain.get("key_files") or []) if kf.get("path")}
+    secrets = {s for s in (((brain.get("security") or {}).get("secret_locations")) or []) if s}
+
+    pool = set()
+    pool |= {p for p in (tree_paths or []) if is_code_file(p)}     # deterministic discovery
+    pool |= {p for p in key_files if p}
+    pool |= {p for p in secrets if "/" in p or "." in p}
+    pool |= queued
+
+    candidates = []
+    for p in pool:
+        is_key = p in key_files
+        in_secrets = p in secrets
+        is_queued = p in queued
+        path_score = path_security_score(p)
+        # qualify: a security-keyword path, OR an explicitly-flagged file (key/secret/queued)
+        if not (path_score > 0 or is_key or in_secrets or is_queued):
+            continue
+        is_changed = p in changed
+        score = (path_score
+                 + (10 if is_queued else 0)
+                 + (8 if is_changed else 0)
+                 + (4 if in_secrets else 0)
+                 + (3 if is_key else 0))
+        candidates.append({"path": p, "score": score, "changed": is_changed, "queued": is_queued})
+    candidates.sort(key=lambda c: (-c["score"], c["path"]))
+    return candidates
+
+
+def pack_to_budget(ranked, sizes, token_budget=TOKEN_BUDGET, per_file_cap=PER_FILE_CHAR_CAP,
+                   max_files=MAX_FILES, chars_per_token=CHARS_PER_TOKEN):
+    """Greedily select top-ranked files until the token budget or file cap is hit. Each file's cost is
+    estimated from its byte size, capped at per_file_cap. Skips an over-budget file but keeps trying
+    smaller lower-ranked ones. Returns (selected_paths, dropped_count)."""
+    selected, total_tokens, dropped = [], 0, 0
+    for c in ranked:
+        if len(selected) >= max_files:
+            dropped += 1
+            continue
+        size_chars = min(sizes.get(c["path"], per_file_cap), per_file_cap)
+        est_tokens = size_chars / chars_per_token
+        if total_tokens + est_tokens > token_budget:
+            dropped += 1
+            continue
+        selected.append(c["path"])
+        total_tokens += est_tokens
+    return selected, dropped
 
 
 # ---------------------------------------------------------------- gate
@@ -198,10 +265,54 @@ def fetch_file(repo_path, filename, branch, headers):
     try:
         data = r.json()
         if data.get("encoding") == "base64" and data.get("content"):
-            return base64.b64decode(data["content"]).decode("utf-8", errors="ignore")[:FILE_CHAR_CAP]
+            return base64.b64decode(data["content"]).decode("utf-8", errors="ignore")[:PER_FILE_CHAR_CAP]
     except Exception as e:
         print(f"⚠️ decode {filename}: {e}")
     return None
+
+
+def get_head_sha(repo_path, branch, headers):
+    """Current tip SHA of the audited branch (used to diff against last_audit_sha)."""
+    ref = branch or "HEAD"
+    r = requests.get(f"{GITHUB_API}/repos/{repo_path}/commits/{ref}", headers=headers, timeout=HTTP_TIMEOUT)
+    time.sleep(RATE_SLEEP)
+    return r.json().get("sha") if r.status_code == 200 else None
+
+
+def get_repo_tree(repo_path, branch, headers):
+    """Recursive tree of the branch → {path: size_bytes} for code blobs (for deterministic discovery
+    and budget packing without fetching content)."""
+    ref = branch or "HEAD"
+    r = requests.get(f"{GITHUB_API}/repos/{repo_path}/git/trees/{ref}?recursive=1",
+                     headers=headers, timeout=HTTP_TIMEOUT)
+    time.sleep(RATE_SLEEP)
+    if r.status_code != 200:
+        return {}
+    out = {}
+    for it in (r.json().get("tree", []) or [])[:TREE_BLOB_CAP]:
+        if it.get("type") == "blob" and it.get("path"):
+            out[it["path"]] = it.get("size", 0) or 0
+    return out
+
+
+def fetch_changed_files(repo_path, base_sha, head_sha, headers):
+    """Files changed between the last audit and now (Compare API). Returns a list of paths, or None
+    if we have no prior SHA (→ caller treats the full security surface as scope)."""
+    if not base_sha or not head_sha or base_sha == head_sha:
+        return [] if base_sha == head_sha else None
+    paths, page = [], 1
+    while True:
+        r = requests.get(f"{GITHUB_API}/repos/{repo_path}/compare/{base_sha}...{head_sha}",
+                         headers=headers, params={"per_page": 100, "page": page}, timeout=HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return None        # compare failed (e.g. force-push) → fall back to full surface
+        files = (r.json().get("files") or [])
+        paths += [f.get("filename") for f in files if f.get("filename")]
+        if "next" not in (r.links or {}):
+            break
+        page += 1
+        time.sleep(RATE_SLEEP)
+    return paths
 
 
 def collect_queue_files(queue, repo_path):
@@ -282,20 +393,31 @@ if repositories:
         try:
             profile = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
             branch = (profile.get("_fingerprint") or {}).get("branch") or ""
+            prev = audit_state.get(repo_path) or {}
+
+            head_sha = get_head_sha(repo_path, branch, headers)
+            changed = fetch_changed_files(repo_path, prev.get("last_audit_sha"), head_sha, headers)
+            tree = get_repo_tree(repo_path, branch, headers)          # {path: size}
             queue_files, queue = collect_queue_files(queue, repo_path)
-            paths = select_audit_files(profile, queue_files)
-            if not paths:
-                print(f"✓ {repo_path}: no security-critical files to audit; marking done")
+
+            # gather a broad pool (tree discovery + brain + secrets + queue), rank by risk with
+            # changed files boosted, then greedily pack the top into the token budget.
+            ranked = gather_candidates(list(tree.keys()), profile, changed or [], queue_files)
+            selected, dropped = pack_to_budget(ranked, tree)
+            n_changed = len(changed) if changed is not None else 0
+            print(f"  {repo_path}: {len(ranked)} candidate file(s), {n_changed} changed; "
+                  f"auditing {len(selected)}, dropped {dropped} (budget)")
+
             files = {}
-            for p in paths:
+            for p in selected:
                 c = fetch_file(repo_path, p, branch, headers)
                 if c:
                     files[p] = c
             repo_findings = run_audit(model_name, repo_path, profile, files) if files else []
             candidates.extend(repo_findings)
             audit_state[repo_path] = {"last_audit_at": datetime.now(timezone.utc).isoformat(),
-                                      "last_audit_branch": branch}
-            print(f"✓ {repo_path}: deep audit done, {len(repo_findings)} finding(s)")
+                                      "last_audit_branch": branch, "last_audit_sha": head_sha}
+            print(f"✓ {repo_path}: deep audit done over {len(files)} file(s), {len(repo_findings)} finding(s)")
         except Exception as e:
             print(f"⚠️ deep audit failed for {repo_path}: {e}; skipping repo")
             continue
