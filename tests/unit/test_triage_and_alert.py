@@ -136,7 +136,7 @@ class TestDriver:
         return stored, sent
 
     def test_skip_run_no_email_no_ledger(self, monkeypatch):
-        stored, sent = self._run(monkeypatch, {"security_skip_run": True})
+        stored, sent = self._run(monkeypatch, {"security_skip_run": "1"})
         assert sent == []
         assert "security_findings" not in stored
 
@@ -145,7 +145,7 @@ class TestDriver:
                  "vuln_id": "CVE-1", "severity": "high", "fixed": "1.1", "impact": "leaks keys",
                  "actively_exploited": True}]
         stored, sent = self._run(monkeypatch, {
-            "security_skip_run": False, "security_candidates": cand,
+            "security_skip_run": "0", "security_candidates": cand,
             "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
         assert len(sent) == 1
         assert "🛡️" in sent[0]["subject"]
@@ -154,7 +154,7 @@ class TestDriver:
 
     def test_silent_when_no_candidates(self, monkeypatch):
         stored, sent = self._run(monkeypatch, {
-            "security_skip_run": False, "security_candidates": [],
+            "security_skip_run": "0", "security_candidates": [],
             "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
         assert sent == []                                # silence is the all-clear
         assert "display_output" in stored               # but the run still reports it scanned

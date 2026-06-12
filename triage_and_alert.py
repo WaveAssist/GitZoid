@@ -31,15 +31,6 @@ _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
 _CODE_CATEGORIES = ("authz", "secret", "backdoor")
 
 
-def _flag_is_set(value):
-    """Parse a run-based flag from the store. The SDK serialises a JSON-stored scalar as
-    {"value": "True"/"False"} and returns that DICT, so a bare bool(...) is ALWAYS truthy — unwrap
-    and compare the string. Accepts raw bools too."""
-    if isinstance(value, dict):
-        value = value.get("value")
-    return str(value).strip().lower() in ("true", "1", "yes")
-
-
 def lock_is_active(lock, now=None) -> bool:
     """Duplicated from security_check_and_init (nodes never import siblings)."""
     if not isinstance(lock, dict) or not lock.get("at"):
@@ -215,7 +206,7 @@ def release_run_lock():
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
-skip = _flag_is_set(waveassist.fetch_data("security_skip_run", run_based=True, default=False))
+skip = waveassist.fetch_data("security_skip_run", run_based=True, default="0") == "1"
 
 if not skip:
     candidates = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []

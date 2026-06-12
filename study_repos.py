@@ -23,15 +23,6 @@ waveassist.init()   # credits already gated upstream in check_credits_and_init
 
 print("Processing GitZoid brain build (study_repos) node")
 
-
-def _flag_is_set(value):
-    """Parse a run-based flag from the store. The SDK serialises a JSON-stored scalar as
-    {"value": "True"/"False"} and returns that DICT, so a bare bool(...) is ALWAYS truthy — unwrap
-    and compare the string. Accepts raw bools too."""
-    if isinstance(value, dict):
-        value = value.get("value")
-    return str(value).strip().lower() in ("true", "1", "yes")
-
 GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.2
@@ -368,9 +359,9 @@ def needs_rebuild(existing):
 
 # Single-run lock (set by check_credits_and_init): if another run holds it, this cycle is a no-op.
 # Empty repo list short-circuits the loop AND the post-loop stores below, so we never clobber the
-# existing repo_groups / brain. The flag is written run-based and the SDK wraps a JSON scalar as
-# {"value": "..."}, so it MUST be read run-based and unwrapped (bare bool() of the dict is always True).
-skip_run = _flag_is_set(waveassist.fetch_data("skip_run", run_based=True, default=False))
+# existing repo_groups / brain. Run-based "1"/"0" string written by check_credits_and_init — read it
+# run-based so each run sees its OWN flag (a global read would miss the run-scoped write).
+skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
 if skip_run:
     print("GitZoid: skip_run set; study_repos no-op (another run in progress).")
 

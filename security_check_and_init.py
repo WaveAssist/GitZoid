@@ -65,7 +65,8 @@ num_repos = len(repositories) if isinstance(repositories, list) else 0
 if not enabled or num_repos == 0:
     reason = "Security Watch is turned off" if not enabled else "no repositories are connected"
     print(f"GitZoid Security: {reason}; skipping this cycle (clean no-op).")
-    waveassist.store_data("security_skip_run", True, run_based=True, data_type="json")
+    # Run-based STRING "1"/"0" — NOT a json bool (the SDK wraps that as a truthy {"value":"False"} dict).
+    waveassist.store_data("security_skip_run", "1", run_based=True, data_type="string")
     waveassist.store_data("display_output", {
         "html_content": f"<p>GitZoid Security run skipped — {reason}.</p>",
     }, run_based=True, data_type="json")
@@ -83,7 +84,7 @@ else:
     existing_lock = waveassist.fetch_data(RUN_LOCK_KEY, default={}) or {}
     if lock_is_active(existing_lock):
         print("GitZoid Security: previous security run still in progress; skipping this cycle.")
-        waveassist.store_data("security_skip_run", True, run_based=True, data_type="json")
+        waveassist.store_data("security_skip_run", "1", run_based=True, data_type="string")
         waveassist.store_data("display_output", {
             "html_content": "<p>GitZoid is already running a security scan. This cycle will be skipped.</p>",
         }, run_based=True, data_type="json")
@@ -94,5 +95,5 @@ else:
                               data_type="json")
         # run-based so downstream security nodes in THIS run know they hold the lock (and may release it).
         waveassist.store_data("security_run_lock_token", token, run_based=True, data_type="string")
-        waveassist.store_data("security_skip_run", False, run_based=True, data_type="json")
+        waveassist.store_data("security_skip_run", "0", run_based=True, data_type="string")
         print(f"GitZoid Security: credits OK, lock acquired. Scanning {num_repos} repo(s).")

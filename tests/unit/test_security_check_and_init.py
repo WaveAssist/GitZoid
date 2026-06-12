@@ -41,7 +41,7 @@ class TestDriverNoOp:
         monkeypatch.setattr(waveassist, "check_credits_and_notify",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("no credit check when disabled")))
         runpy.run_path("security_check_and_init.py", run_name="__main__")
-        assert stored.get("security_skip_run") is True
+        assert stored.get("security_skip_run") == "1"
         assert "security_run_lock" not in stored      # never took the lock
 
     def test_active_lock_skips_cycle(self, monkeypatch):
@@ -56,7 +56,7 @@ class TestDriverNoOp:
                             lambda key, value, **k: stored.__setitem__(key, value))
         monkeypatch.setattr(waveassist, "check_credits_and_notify", lambda *a, **k: True)
         runpy.run_path("security_check_and_init.py", run_name="__main__")
-        assert stored.get("security_skip_run") is True
+        assert stored.get("security_skip_run") == "1"
         assert "security_run_lock_token" not in stored   # did not overwrite the held lock
 
 

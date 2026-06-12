@@ -103,7 +103,7 @@ if TARGETS:
 else:
     sel = full
 _store_data("github_selected_resources", sel, data_type="json")            # global
-_store_data("security_skip_run", False, run_based=True, data_type="json")  # as the start node sets
+_store_data("security_skip_run", "0", run_based=True, data_type="string")  # as the start node sets
 _store_data("security_candidates", [], run_based=True, data_type="json")
 
 waveassist.call_llm = _local_call_llm

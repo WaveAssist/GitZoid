@@ -1,13 +1,15 @@
 """
-Regression tests for the run-based flag bug (skip_run / security_skip_run).
+Regression tests for the run-based skip flag + handoff keys.
 
-Two compounding defects, both fixed here:
-  Bug 1: flags are written run_based=True but were read globally → reader always got the default.
-  Bug 2: the SDK stores a JSON scalar as {"value": "True"/"False"} and returns that DICT, so a bare
-         bool(...) of it is ALWAYS truthy → a naive "just add run_based=True" fix would skip every run.
+The bug (verified live): flags were written run_based=True but read GLOBALLY (so the read always got
+the default), and a JSON-stored bool comes back as a truthy dict {"value": "False"}.
 
-The fix: read run_based=True AND parse via _flag_is_set (unwraps the dict). The same run_based read
-also applies to the run-based `security_candidates` handoff and the `security_run_lock_token`.
+The fix matches what the GitZoid team already did for run_lock_token: the flags are run-based STRINGS
+"1"/"0" (strings round-trip cleanly; no dict wrapping), read run-based and compared == "1". The
+run-based `security_candidates` handoff (scan→audit→triage) is likewise read run-based.
+
+These tests use a faithful fake of the SDK store (wraps JSON scalars, scopes by run_based) so the
+real run-based behaviour is exercised — a global read or a json-bool flag would fail them.
 """
 import sys
 import os
@@ -15,40 +17,10 @@ import runpy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
-from study_repos import _flag_is_set as sr_flag
-from fetch_pull_requests import _flag_is_set as fpr_flag
-from scan_dependencies import _flag_is_set as sd_flag
-from deep_security_audit import _flag_is_set as dsa_flag
-from triage_and_alert import _flag_is_set as ta_flag
-
-ALL_HELPERS = [sr_flag, fpr_flag, sd_flag, dsa_flag, ta_flag]
-
-
-class TestFlagParsing:
-    """Every node's copy of _flag_is_set must unwrap the SDK dict and parse correctly."""
-
-    def test_sdk_wrapped_false_is_false(self):
-        for f in ALL_HELPERS:
-            assert f({"value": "False"}) is False     # the bug: bool({"value":"False"}) was True
-
-    def test_sdk_wrapped_true_is_true(self):
-        for f in ALL_HELPERS:
-            assert f({"value": "True"}) is True
-
-    def test_raw_bools(self):
-        for f in ALL_HELPERS:
-            assert f(True) is True
-            assert f(False) is False
-
-    def test_missing_or_none_is_false(self):
-        for f in ALL_HELPERS:
-            assert f(None) is False
-            assert f("") is False
-
 
 class _FakeStore:
-    """Faithful mini-mock of the WaveAssist SDK store: wraps JSON scalars as {"value": str(v)} like
-    the real backend, and scopes writes/reads by run_based so the run-based handoff is exercised."""
+    """Mini-mock of the WaveAssist backend: JSON scalars wrap as {"value": str(v)}; writes/reads are
+    scoped by run_based (global dict vs run dict)."""
     def __init__(self):
         self.g, self.r = {}, {}
 
@@ -68,9 +40,9 @@ _FINDING = {"category": "dependency", "repo": "o/r", "name": "litellm", "version
 
 
 class TestTriageRunBasedHandoff:
-    """Drives the real triage_and_alert.py against the faithful fake. The 'not skipped' case is the
-    discriminating one: it fails for the current bug (candidates read globally → none found → no
-    email) AND for a naive Bug-1-only fix (skip read as bool(dict) → always skip → no email)."""
+    """Drives the real triage_and_alert.py against the faithful fake. The 'not skipped' case is
+    discriminating: it fails for a global candidates read (run-based candidates not found → no email)
+    and for a json-bool skip flag (truthy dict → always skip → no email)."""
 
     def _run(self, monkeypatch, fs):
         import waveassist
@@ -82,21 +54,46 @@ class TestTriageRunBasedHandoff:
         runpy.run_path("triage_and_alert.py", run_name="__main__")
         return sent, fs
 
-    def test_emails_when_not_skipped_with_run_based_candidates(self, monkeypatch):
-        fs = _FakeStore()
-        fs.store("security_skip_run", False, run_based=True, data_type="json")   # SDK-wrapped False
+    def _seed(self, fs, skip):
+        fs.store("security_skip_run", skip, run_based=True, data_type="string")  # "0"/"1" string
         fs.store("security_candidates", [_FINDING], run_based=True, data_type="json")
         fs.store("security_findings", {}, data_type="json")
         fs.store("github_selected_resources", [{"id": "o/r"}], data_type="json")
+
+    def test_emails_when_not_skipped(self, monkeypatch):
+        fs = _FakeStore()
+        self._seed(fs, "0")
         sent, fs = self._run(monkeypatch, fs)
-        assert len(sent) == 1                          # must find run-based candidates and email
+        assert len(sent) == 1                          # finds run-based candidates, not skipped → email
         assert fs.g.get("security_findings")           # ledger (global) written
 
     def test_silent_when_skipped(self, monkeypatch):
         fs = _FakeStore()
-        fs.store("security_skip_run", True, run_based=True, data_type="json")    # SDK-wrapped True
-        fs.store("security_candidates", [_FINDING], run_based=True, data_type="json")
-        fs.store("security_findings", {}, data_type="json")
-        fs.store("github_selected_resources", [{"id": "o/r"}], data_type="json")
+        self._seed(fs, "1")
         sent, _ = self._run(monkeypatch, fs)
-        assert sent == []                              # skip flag honored → no email
+        assert sent == []                              # "1" → skip honored → no email
+
+
+class TestWriterStringContract:
+    """security_check_and_init must write the flag as a run-based STRING "0"/"1" (not a json bool)."""
+
+    def _run_init(self, monkeypatch, fs):
+        import waveassist
+        monkeypatch.setattr(waveassist, "fetch_data", fs.fetch)
+        monkeypatch.setattr(waveassist, "store_data", fs.store)
+        monkeypatch.setattr(waveassist, "check_credits_and_notify", lambda *a, **k: True)
+        runpy.run_path("security_check_and_init.py", run_name="__main__")
+
+    def test_acquire_writes_zero_string(self, monkeypatch):
+        fs = _FakeStore()
+        fs.store("enable_security", "true", data_type="string")
+        fs.store("github_selected_resources", [{"id": "o/r"}], data_type="json")
+        self._run_init(monkeypatch, fs)
+        assert fs.r.get("security_skip_run") == "0"    # acquired this run → "0", run-based, string
+
+    def test_disabled_writes_one_string(self, monkeypatch):
+        fs = _FakeStore()
+        fs.store("enable_security", "false", data_type="string")
+        fs.store("github_selected_resources", [{"id": "o/r"}], data_type="json")
+        self._run_init(monkeypatch, fs)
+        assert fs.r.get("security_skip_run") == "1"    # disabled → skip → "1"

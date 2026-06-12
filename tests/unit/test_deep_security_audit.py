@@ -106,7 +106,7 @@ class TestAuditGate:
 class TestDriverNoOp:
     def test_skip_run_makes_no_network_calls(self, monkeypatch):
         import runpy, waveassist, requests
-        fetch_map = {"security_skip_run": True, "github_selected_resources": [{"id": "o/r"}],
+        fetch_map = {"security_skip_run": "1", "github_selected_resources": [{"id": "o/r"}],
                      "github_access_token": "t"}
         stored = {}
         monkeypatch.setattr(waveassist, "fetch_data",
