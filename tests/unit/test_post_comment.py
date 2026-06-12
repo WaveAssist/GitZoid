@@ -241,3 +241,26 @@ class TestReleaseRunLock:
         with patch.object(post_comment, "waveassist", wa):
             release_run_lock()
         wa.store_data.assert_not_called()
+
+    def test_skip_run_blocks_release_despite_matching_global_token(self):
+        # run_lock_token is global, so a skipped cycle reads the HOLDER's token and would
+        # match — the run-based skip_run flag must stop it from freeing the holder's lock.
+        wa = self._wa({
+            "skip_run": True,
+            "run_lock_token": "HOLDER",
+            "run_lock": {"at": "now", "token": "HOLDER"},
+        })
+        with patch.object(post_comment, "waveassist", wa):
+            release_run_lock()
+        wa.store_data.assert_not_called()
+
+    def test_acquiring_cycle_releases_with_skip_run_false(self):
+        # The run that acquired the lock has skip_run=False and a matching global token.
+        wa = self._wa({
+            "skip_run": False,
+            "run_lock_token": "T1",
+            "run_lock": {"at": "now", "token": "T1"},
+        })
+        with patch.object(post_comment, "waveassist", wa):
+            release_run_lock()
+        wa.store_data.assert_called_once_with("run_lock", {}, data_type="json")

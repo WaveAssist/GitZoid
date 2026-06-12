@@ -346,13 +346,19 @@ if should_process:
 
 
 def release_run_lock():
-    """Release the single-run lock acquired by check_credits_and_init — but only if THIS run owns
-    it (token match), so an overlapping/skipped cycle can never free another run's lock. As the
-    last node in the DAG, reaching here means the run is done; a crashed run leaves the lock to
-    expire via its TTL instead."""
+    """Release the single-run lock acquired by check_credits_and_init — but only if THIS cycle
+    actually acquired it (a skipped cycle never held the lock) and still owns it (token match),
+    so an overlapping/skipped cycle can never free another run's lock. As the last node in the
+    DAG, reaching here means the run is done; a crashed run leaves the lock to expire via its TTL.
+
+    `run_lock_token` is global (not run-based), so a skipped cycle would read the *holder's*
+    token and wrongly match — the run-based `skip_run` flag is what tells us this cycle skipped,
+    so we must bail out on it BEFORE comparing tokens."""
+    if waveassist.fetch_data("skip_run", run_based=True, default=False):
+        return  # this cycle was a lock-skip — it never held the lock
     my_token = waveassist.fetch_data("run_lock_token", default="") or ""
     if not my_token:
-        return  # this cycle was a lock-skip (or no token) — nothing to release
+        return  # no token recorded — nothing to release
     lock = waveassist.fetch_data("run_lock", default={}) or {}
     if isinstance(lock, dict) and lock.get("token") == my_token:
         waveassist.store_data("run_lock", {}, data_type="json")
