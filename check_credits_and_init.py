@@ -91,7 +91,9 @@ if not success:
 existing_lock = waveassist.fetch_data(RUN_LOCK_KEY, default={}) or {}
 if lock_is_active(existing_lock):
     print("GitZoid: previous run still in progress; skipping this cycle.")
-    waveassist.store_data("skip_run", True, run_based=True, data_type="json")
+    # Run-based STRING "1"/"0" (not a json bool, which the SDK wraps as a truthy {"value": "False"}
+    # dict). Downstream nodes read it run-based and compare == "1".
+    waveassist.store_data("skip_run", "1", run_based=True, data_type="string")
     display_output = {
         "html_content": "<p>GitZoid is already reviewing your pull requests. This run will be skipped.</p>",
     }
@@ -103,12 +105,14 @@ else:
         {"at": datetime.now(timezone.utc).isoformat(), "token": token},
         data_type="json",
     )
-    # Global (NOT run-based): only the run that holds the lock ever writes this, and the lock
-    # guarantees a single holder at a time, so the global value always reflects the current
-    # holder's token. post_comment reads it the same way to release. (A run-based write here
-    # is the bug that wedged GitZoid: post_comment read it globally and never matched.)
-    waveassist.store_data("run_lock_token", token, data_type="string")
-    waveassist.store_data("skip_run", False, run_based=True, data_type="json")
+    # Run-based: scoped to THIS run's id so each run records its own lock token. post_comment
+    # MUST read it run-based too (the original bug was it read this globally and never matched,
+    # so the lock was never released and only the TTL freed it). A skipped/overlapping cycle
+    # never writes this, so under its own run id it reads "" and can't free the holder's lock.
+    # Kept as a string (round-trips cleanly) — NOT a json bool, which the SDK wraps as
+    # {"value": "False"} and returns as a truthy dict.
+    waveassist.store_data("run_lock_token", token, run_based=True, data_type="string")
+    waveassist.store_data("skip_run", "0", run_based=True, data_type="string")
     waveassist.store_data(
         "tentative_time_to_process", str(time_to_process), run_based=True, data_type="string"
     )

@@ -9,7 +9,9 @@ the verdict. Conventions: flat script, no __main__ guard, init() first, fall-thr
 """
 import hashlib
 import re
+import requests
 import waveassist
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -156,6 +158,41 @@ def brain_auth_files(profile):
     return out
 
 
+def auth_touched_files(files, brain_profile):
+    """Paths among the PR's changed files that match an auth-flagged file in the brain (by full path
+    or basename). These get queued for the weekly deep_security_audit."""
+    auth = brain_auth_files(brain_profile)
+    auth_bases = {a.split("/")[-1] for a in auth}
+    out = []
+    for f in (files or []):
+        fn = f.get("filename", "")
+        if not fn:
+            continue
+        if fn in auth or fn.split("/")[-1] in auth_bases:
+            out.append(fn)
+    return out
+
+
+def build_audit_queue_entry(repo_path, pr_number, files, current_sha, brain_profile):
+    """Build a tripwire queue entry for a PR that touched auth files, or None. The weekly audit
+    consumes these and prioritizes the named files."""
+    touched = auth_touched_files(files, brain_profile)
+    if not touched:
+        return None
+    return {"repo": repo_path, "pr": pr_number, "files": touched, "sha": current_sha,
+            "queued_at": datetime.now(timezone.utc).isoformat()}
+
+
+def merge_audit_queue(queue, entry):
+    """Upsert a queue entry by (repo, pr) — the latest push for a PR replaces its prior entry."""
+    if not entry:
+        return queue or []
+    key = (entry.get("repo"), entry.get("pr"))
+    out = [q for q in (queue or []) if (q.get("repo"), q.get("pr")) != key]
+    out.append(entry)
+    return out
+
+
 def _format_brain_profile(profile):
     """Render the v2 repo profile into an XML block the model can use to reduce false positives."""
     if not isinstance(profile, dict) or not profile:
@@ -225,6 +262,7 @@ _REVIEW_RULES = """
     - Avoid ; and - and emdash as much as possible. but not forced. 
     SEVERITY: high=likely runtime bug/data loss/breakage/real security hole; medium=should fix (edge case, weak error handling, convention violation); low=minor/style.
     CATEGORY (findings[] only): bug | security. Put perf/readability in potential_optimizations[] and nits/style in suggestions[], NOT as findings. Use 'security' only for the sweep items below.
+    LIMIT: potential_optimizations[] and suggestions[] are low-priority and mostly unused — emit at most 3 of EACH, only the most useful, and do not pad. Rate findings honestly by the SEVERITY scale; never inflate a minor issue to high just to surface it (a real medium/low belongs in medium/low, or in these two lists).
     SUGGESTION: when a fix is small and unambiguous, include committable code in suggested_replacement; else omit.
     SECURITY SWEEP (light, high-confidence only):
     - Newly ADDED line that looks like a live secret (high-entropy token/key). Skip placeholders/test fixtures/examples.
@@ -463,6 +501,129 @@ def security_sweep(files, brain_profile):
     return findings
 
 
+# ---------------------------------------------------------------- verify pass (refute before posting)
+#
+# The find pass + gate are deliberately a bit trigger-happy (they only see the diff hunk). Before a
+# finding is posted, an adversarial second pass re-checks it against the FULL surrounding code so
+# out-of-hunk context (a guard/early-return above the change) can refute false positives — exactly
+# the class that a diff-only reviewer can't see. It also corrects inflated severity, then RE-GATES
+# the survivors so the verdict reflects reality. Only the gate-kept (postable) findings are verified.
+#
+# Fail-open: if the token/file/LLM is unavailable, the finding is kept as-is. Verification only ever
+# removes a finding it can ACTIVELY refute — a transient failure must never silently drop a real bug.
+
+VERIFY_TIMEOUT = 10
+VERIFY_WHOLE_FILE_MAX_LINES = 400   # pass the whole file at/under this; otherwise a window
+VERIFY_WINDOW_RADIUS = 80           # lines above/below the finding when the file is large
+
+
+class VerifyVerdict(BaseModel):
+    """Adversarial re-check of ONE gate-kept finding against the full surrounding code."""
+    is_real: bool = Field(
+        description="False ONLY if the full code shows this cannot actually happen on that line "
+                    "(e.g. an earlier guard/early-return makes it unreachable with the problematic "
+                    "value, or the finding misreads the code). If it can happen, or you cannot rule "
+                    "it out, True. Do not invent hypothetical preconditions.")
+    true_severity: Literal["high", "medium", "low"] = Field(
+        description="Severity judged WITH the full context. high=real runtime bug/data loss/"
+                    "breakage/security hole; medium=should-fix correctness smell; low=minor/non-issue.")
+    reason: str = Field(
+        description="If real: the concrete trigger — the input and path that reaches the line. "
+                    "If not real: exactly why it cannot occur.")
+
+
+def _gh_raw_headers(token):
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}
+
+
+def fetch_file_text(repo_path, path, ref, token):
+    """Full text of `path` at commit `ref` from GitHub, or '' on any failure (caller fails open)."""
+    if not (repo_path and path and ref and token):
+        return ""
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{repo_path}/contents/{path}",
+            headers=_gh_raw_headers(token), params={"ref": ref}, timeout=VERIFY_TIMEOUT)
+        return resp.text if resp.status_code == 200 else ""
+    except Exception:
+        return ""
+
+
+def context_window(file_text, line):
+    """Whole file when short enough, else a generous window around `line` (1-based) so the verifier
+    sees the enclosing function and any guards above/below the changed hunk."""
+    lines = file_text.splitlines()
+    if len(lines) <= VERIFY_WHOLE_FILE_MAX_LINES:
+        return file_text
+    if not isinstance(line, int) or line < 1:
+        return "\n".join(lines[:VERIFY_WHOLE_FILE_MAX_LINES])
+    lo = max(0, line - 1 - VERIFY_WINDOW_RADIUS)
+    hi = min(len(lines), line - 1 + VERIFY_WINDOW_RADIUS)
+    return "\n".join(lines[lo:hi])
+
+
+def get_verify_prompt(finding, context_code):
+    line = finding.get("line")
+    loc = f"{finding.get('path') or '(cross-cutting)'}:{line}" if line else (finding.get("path") or "(cross-cutting)")
+    return f"""You are adversarially RE-CHECKING one code-review finding before it is posted. Default
+to skeptical: it survives only if it genuinely holds against the FULL code below.
+
+FINDING (claimed {finding.get('severity')} {finding.get('category')} at {loc}):
+{finding.get('body')}
+
+SURROUNDING CODE (the full file when available, otherwise the diff — trace it, do not assume):
+```
+{context_code}
+```
+
+- is_real: False ONLY if the code shows this cannot actually happen on that line (a guard/early-return
+  makes it unreachable, or the finding misreads the code). If it can happen, or you can't rule it out, True.
+- true_severity: judge impact WITH the full context (a guarded or edge case is medium/low, not high).
+- reason: if real, name the concrete trigger (input + path to the line); if not, say exactly why it can't occur.
+Return only the structured verdict."""
+
+
+def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity_threshold="high"):
+    """Refute each gate-kept finding against its full function, drop clear false positives, correct
+    inflated severity, then re-gate so the verdict reflects reality. Returns (kept, verdict, dropped).
+    Fails open per-finding (see module note above)."""
+    if not findings:
+        return findings, "looks_good", []
+    repo_path, head_sha = pr.get("id", ""), pr.get("current_sha", "")
+    patches = {fl.get("filename"): (fl.get("patch") or "") for fl in (pr.get("files") or [])}
+    cache, survivors, dropped = {}, [], []
+    for f in findings:
+        path = f.get("path") or ""
+        if not path:
+            survivors.append(f); continue                       # unanchored → fail open
+        if token and path not in cache:
+            cache[path] = fetch_file_text(repo_path, path, head_sha, token)
+        file_text = cache.get(path) or ""
+        # Full file is best (it sees guards OUTSIDE the diff hunk); fall back to the diff when the
+        # file can't be fetched — weaker, but better than skipping the check entirely.
+        ctx = context_window(file_text, f.get("line")) if file_text else patches.get(path, "")
+        if not ctx:
+            survivors.append(f); continue                       # no context at all → fail open
+        # Any failure here (LLM down, unexpected return, bad signature) fails OPEN — the finding is
+        # kept and the PR review proceeds. Verification must never be able to break a review.
+        try:
+            verdict = waveassist.call_llm(
+                model=model_name, prompt=get_verify_prompt(f, ctx),
+                response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
+            v = verdict.model_dump() if verdict is not None else None
+        except Exception as e:
+            print(f"   verify: error on {f.get('path')}:{f.get('line')} ({e}) — keeping finding.")
+            v = None
+        if not v:
+            survivors.append(f); continue                       # unavailable/error → fail open
+        if not v.get("is_real"):
+            dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue
+        # Verified real → trust the re-judged severity, and treat confidence as high.
+        survivors.append({**f, "severity": v.get("true_severity") or f.get("severity"), "confidence": "high"})
+    kept, verdict, _ = apply_gate(survivors, diff_lines, seen_sigs=set(), severity_threshold=severity_threshold)
+    return kept, verdict, dropped
+
+
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 prs = waveassist.fetch_data("pull_requests", default=[]) or []
@@ -471,6 +632,7 @@ if prs:
     repo_config = {r["id"]: r.get("properties", {}) for r in repositories if isinstance(r, dict) and r.get("id")}
     global_model = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL
     global_context = waveassist.fetch_data("additional_context", default="") or ""
+    audit_queue_entries = []   # PRs touching auth files → queued for the weekly deep_security_audit
 
     for pr in prs:
         try:
@@ -502,15 +664,32 @@ if prs:
                 raise Exception("Review not generated.")
 
             review_dict = result.model_dump()
+            # Low-priority lists are mostly unused downstream — hard-cap at 3 each (the prompt asks
+            # for this too; this is the guarantee).
+            review_dict["potential_optimizations"] = (review_dict.get("potential_optimizations") or [])[:3]
+            review_dict["suggestions"] = (review_dict.get("suggestions") or [])[:3]
             diff_lines = build_diff_lines(pr.get("files"))
             raw = (review_dict.get("findings") or []) + security_sweep(pr.get("files"), pr.get("brain_profile"))
             kept, verdict, _ = apply_gate(raw, diff_lines, seen_sigs=set(),
                                           severity_threshold=severity_threshold)
+            # Adversarial verify pass: refute each posted finding against its full function before it ships.
+            access_token = waveassist.fetch_data("github_access_token", default="") or ""
+            kept, verdict, dropped = verify_posted_findings(
+                kept, pr, access_token, model_name, diff_lines, severity_threshold)
+            if dropped:
+                print(f"   verify: dropped {len(dropped)} finding(s) that didn't hold against full context.")
             review_dict["findings"] = kept
             review_dict["verdict"] = verdict
 
             pr.update(review_dict=review_dict, comment_generated=True,
                       comment_posted=False, review_type=review_type)
+
+            # Tripwire: if this PR touched an auth-flagged file, queue it for the weekly deep audit
+            # (closes the "deferred to the weekly audit" promise the security sweep already prints).
+            entry = build_audit_queue_entry(repo_path, pr.get("pr_number"), pr.get("files"),
+                                            pr.get("current_sha", ""), pr.get("brain_profile"))
+            if entry:
+                audit_queue_entries.append(entry)
             print(f"✅ PR #{pr.get('pr_number')} {review_type} review generated "
                   f"(model={model_name}, verdict={verdict}, findings={len(kept)}).")
         except Exception as e:
@@ -518,4 +697,12 @@ if prs:
             pr.update(review_dict={}, comment_generated=False, comment_posted=False)
 
     waveassist.store_data("pull_requests", prs, data_type="json")
+
+    # Persist the audit tripwire queue for the weekly deep_security_audit (additive; merges by PR).
+    if audit_queue_entries:
+        queue = waveassist.fetch_data("security_audit_queue", default=[]) or []
+        for entry in audit_queue_entries:
+            queue = merge_audit_queue(queue, entry)
+        waveassist.store_data("security_audit_queue", queue, data_type="json")
+        print(f"Queued {len(audit_queue_entries)} auth-touched PR(s) for the weekly deep audit.")
     print("All PR reviews processed and stored.")

@@ -340,7 +340,7 @@ def fetch_and_process_prs(
 
 # Single-run lock (set by check_credits_and_init): if another run holds it, no-op (empty repo list
 # means no PRs are queued, so generate_review / post_comment downstream also no-op).
-skip_run = bool(waveassist.fetch_data("skip_run", default=False))
+skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
 if skip_run:
     print("GitZoid: skip_run set; fetch_pull_requests no-op (another run in progress).")
 

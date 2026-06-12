@@ -36,7 +36,7 @@ class TestSkipRunNoOp:
 
     def test_skip_run_does_no_work(self, monkeypatch):
         import runpy, waveassist
-        fetch_map = {"skip_run": True, "github_selected_resources": [{"id": "owner/repo"}],
+        fetch_map = {"skip_run": "1", "github_selected_resources": [{"id": "owner/repo"}],
                      "github_access_token": "tok", "reviewed_prs": {}}
         stored = {}
         called = {"get": 0}
