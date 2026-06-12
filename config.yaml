@@ -132,6 +132,40 @@ variables:
       - name: "Off"
         key: "false"
 
+  # Which weekday the DEEP code audit runs. The dependency scan runs daily regardless; the audit is
+  # weekly (plus once on first setup so you see it immediately). Mon=0 .. Sun=6.
+  - name: audit_day
+    key: audit_day
+    display_name: Weekly security audit day
+    type: select
+    is_optional: true
+    default_value: "0"
+    helper_message: "Day of the week GitZoid runs the deep security code audit. The daily dependency scan is unaffected."
+    options:
+      - name: Monday
+        key: "0"
+      - name: Tuesday
+        key: "1"
+      - name: Wednesday
+        key: "2"
+      - name: Thursday
+        key: "3"
+      - name: Friday
+        key: "4"
+      - name: Saturday
+        key: "5"
+      - name: Sunday
+        key: "6"
+
+  # Extra recipients CC'd on security alerts. The account owner always receives them. Comma separated.
+  - name: security_recipients
+    key: security_recipients
+    display_name: Security alert recipients (CC)
+    type: string
+    is_optional: true
+    default_value: ""
+    helper_message: "Additional emails to CC on security alerts, comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them."
+
   - name: schedule
     key: schedule
     display_name: Review frequency

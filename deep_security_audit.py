@@ -36,7 +36,7 @@ GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.15
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
-AUDIT_TTL_DAYS = 7
+AUDIT_SAFETY_DAYS = 8   # a missed audit-day still runs within ~a week (safety net)
 MAX_AUDIT_TOKENS = 4096
 RUN_TIME_BUDGET_SECONDS = 1200      # ~20 min: overflow repos resume next daily tick
 
@@ -68,16 +68,22 @@ EXCLUDE_SUBSTR = ("test", "spec", "node_modules", "vendor", "dist", "/build/", "
 
 # ---------------------------------------------------------------- throttle
 
-def needs_audit(state_entry, now=None, ttl_days=AUDIT_TTL_DAYS) -> bool:
-    """A repo is due if never audited or its last audit is older than the TTL."""
+def needs_audit(state_entry, now=None, audit_weekday=0) -> bool:
+    """Due if: never audited (FIRST run, so users see the audit right after setup); OR it's the
+    configured audit weekday and we have not already run today; OR a safety window elapsed (so a
+    missed weekday still runs within ~a week). audit_weekday: Mon=0 .. Sun=6."""
     if not state_entry or not state_entry.get("last_audit_at"):
         return True
     now = now or datetime.now(timezone.utc)
     try:
-        age = (now - datetime.fromisoformat(state_entry["last_audit_at"])).days
+        last = datetime.fromisoformat(state_entry["last_audit_at"])
     except Exception:
         return True
-    return age >= ttl_days
+    if last.date() == now.date():
+        return False                          # already audited today
+    if now.weekday() == audit_weekday:
+        return True                           # scheduled audit day
+    return (now - last).days >= AUDIT_SAFETY_DAYS
 
 
 # ---------------------------------------------------------------- scope: gather → rank → pack
@@ -396,11 +402,18 @@ if repositories:
     headers = _gh_headers(access_token)
     audit_state = waveassist.fetch_data("security_audit_state", default={}) or {}
     queue = waveassist.fetch_data("security_audit_queue", default=[]) or []
+    try:
+        audit_weekday = int(waveassist.fetch_data("audit_day", default="0") or "0")
+    except (TypeError, ValueError):
+        audit_weekday = 0
+    if not (0 <= audit_weekday <= 6):
+        audit_weekday = 0
 
-    # Repos due for audit, oldest-audited first, so a large fleet rotates fairly across days.
+    # Repos due for audit (first run + configured weekday), oldest-audited first so a large fleet
+    # rotates fairly across days.
     repo_paths = [(r.get("id") if isinstance(r, dict) else r) for r in repositories]
     repo_paths = [r for r in repo_paths if r]
-    due = [r for r in repo_paths if needs_audit(audit_state.get(r))]
+    due = [r for r in repo_paths if needs_audit(audit_state.get(r), audit_weekday=audit_weekday)]
     due.sort(key=lambda r: (audit_state.get(r) or {}).get("last_audit_at", ""))
 
     candidates = []

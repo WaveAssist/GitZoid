@@ -9,6 +9,7 @@ the verdict. Conventions: flat script, no __main__ guard, init() first, fall-thr
 """
 import hashlib
 import re
+import requests
 import waveassist
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
@@ -499,6 +500,118 @@ def security_sweep(files, brain_profile):
     return findings
 
 
+# ---------------------------------------------------------------- verify pass (refute before posting)
+#
+# The find pass + gate are deliberately a bit trigger-happy (they only see the diff hunk). Before a
+# finding is posted, an adversarial second pass re-checks it against the FULL surrounding code so
+# out-of-hunk context (a guard/early-return above the change) can refute false positives — exactly
+# the class that a diff-only reviewer can't see. It also corrects inflated severity, then RE-GATES
+# the survivors so the verdict reflects reality. Only the gate-kept (postable) findings are verified.
+#
+# Fail-open: if the token/file/LLM is unavailable, the finding is kept as-is. Verification only ever
+# removes a finding it can ACTIVELY refute — a transient failure must never silently drop a real bug.
+
+VERIFY_TIMEOUT = 10
+VERIFY_WHOLE_FILE_MAX_LINES = 400   # pass the whole file at/under this; otherwise a window
+VERIFY_WINDOW_RADIUS = 80           # lines above/below the finding when the file is large
+
+
+class VerifyVerdict(BaseModel):
+    """Adversarial re-check of ONE gate-kept finding against the full surrounding code."""
+    is_real: bool = Field(
+        description="False ONLY if the full code shows this cannot actually happen on that line "
+                    "(e.g. an earlier guard/early-return makes it unreachable with the problematic "
+                    "value, or the finding misreads the code). If it can happen, or you cannot rule "
+                    "it out, True. Do not invent hypothetical preconditions.")
+    true_severity: Literal["high", "medium", "low"] = Field(
+        description="Severity judged WITH the full context. high=real runtime bug/data loss/"
+                    "breakage/security hole; medium=should-fix correctness smell; low=minor/non-issue.")
+    reason: str = Field(
+        description="If real: the concrete trigger — the input and path that reaches the line. "
+                    "If not real: exactly why it cannot occur.")
+
+
+def _gh_raw_headers(token):
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}
+
+
+def fetch_file_text(repo_path, path, ref, token):
+    """Full text of `path` at commit `ref` from GitHub, or '' on any failure (caller fails open)."""
+    if not (repo_path and path and ref and token):
+        return ""
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{repo_path}/contents/{path}",
+            headers=_gh_raw_headers(token), params={"ref": ref}, timeout=VERIFY_TIMEOUT)
+        return resp.text if resp.status_code == 200 else ""
+    except Exception:
+        return ""
+
+
+def context_window(file_text, line):
+    """Whole file when short enough, else a generous window around `line` (1-based) so the verifier
+    sees the enclosing function and any guards above/below the changed hunk."""
+    lines = file_text.splitlines()
+    if len(lines) <= VERIFY_WHOLE_FILE_MAX_LINES:
+        return file_text
+    if not isinstance(line, int) or line < 1:
+        return "\n".join(lines[:VERIFY_WHOLE_FILE_MAX_LINES])
+    lo = max(0, line - 1 - VERIFY_WINDOW_RADIUS)
+    hi = min(len(lines), line - 1 + VERIFY_WINDOW_RADIUS)
+    return "\n".join(lines[lo:hi])
+
+
+def get_verify_prompt(finding, context_code):
+    line = finding.get("line")
+    loc = f"{finding.get('path') or '(cross-cutting)'}:{line}" if line else (finding.get("path") or "(cross-cutting)")
+    return f"""You are adversarially RE-CHECKING one code-review finding before it is posted. Default
+to skeptical: it survives only if it genuinely holds against the FULL code below.
+
+FINDING (claimed {finding.get('severity')} {finding.get('category')} at {loc}):
+{finding.get('body')}
+
+FULL SURROUNDING CODE (authoritative — trace it, do not assume):
+```
+{context_code}
+```
+
+- is_real: False ONLY if the code shows this cannot actually happen on that line (a guard/early-return
+  makes it unreachable, or the finding misreads the code). If it can happen, or you can't rule it out, True.
+- true_severity: judge impact WITH the full context (a guarded or edge case is medium/low, not high).
+- reason: if real, name the concrete trigger (input + path to the line); if not, say exactly why it can't occur.
+Return only the structured verdict."""
+
+
+def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity_threshold="high"):
+    """Refute each gate-kept finding against its full function, drop clear false positives, correct
+    inflated severity, then re-gate so the verdict reflects reality. Returns (kept, verdict, dropped).
+    Fails open per-finding (see module note above)."""
+    if not findings:
+        return findings, "looks_good", []
+    repo_path, head_sha = pr.get("id", ""), pr.get("current_sha", "")
+    cache, survivors, dropped = {}, [], []
+    for f in findings:
+        path = f.get("path") or ""
+        if not (token and path):
+            survivors.append(f); continue                       # no context available → fail open
+        if path not in cache:
+            cache[path] = fetch_file_text(repo_path, path, head_sha, token)
+        if not cache[path]:
+            survivors.append(f); continue                       # fetch failed → fail open
+        verdict = waveassist.call_llm(
+            model=model_name, prompt=get_verify_prompt(f, context_window(cache[path], f.get("line"))),
+            response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
+        if verdict is None:
+            survivors.append(f); continue                       # LLM unavailable → fail open
+        v = verdict.model_dump()
+        if not v.get("is_real"):
+            dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue
+        # Verified real → trust the re-judged severity, and treat confidence as high.
+        survivors.append({**f, "severity": v.get("true_severity") or f.get("severity"), "confidence": "high"})
+    kept, verdict, _ = apply_gate(survivors, diff_lines, seen_sigs=set(), severity_threshold=severity_threshold)
+    return kept, verdict, dropped
+
+
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 prs = waveassist.fetch_data("pull_requests", default=[]) or []
@@ -543,6 +656,12 @@ if prs:
             raw = (review_dict.get("findings") or []) + security_sweep(pr.get("files"), pr.get("brain_profile"))
             kept, verdict, _ = apply_gate(raw, diff_lines, seen_sigs=set(),
                                           severity_threshold=severity_threshold)
+            # Adversarial verify pass: refute each posted finding against its full function before it ships.
+            access_token = waveassist.fetch_data("github_access_token", default="") or ""
+            kept, verdict, dropped = verify_posted_findings(
+                kept, pr, access_token, model_name, diff_lines, severity_threshold)
+            if dropped:
+                print(f"   verify: dropped {len(dropped)} finding(s) that didn't hold against full context.")
             review_dict["findings"] = kept
             review_dict["verdict"] = verdict
 

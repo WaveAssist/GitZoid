@@ -31,6 +31,9 @@ if not UID or not PROJECT:
 
 SEND = "--send" in sys.argv
 NO_BRAIN = "--no-brain" in sys.argv
+# Persist the security_findings ledger to a local file across runs, so dedup can be demonstrated
+# end-to-end (run twice with the same --ledger=PATH: the 2nd run should re-alert nothing).
+LEDGER_FILE = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--ledger=")), None)
 TARGETS = [a for a in sys.argv[1:] if not a.startswith("--")]
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
@@ -105,6 +108,9 @@ else:
 _store_data("github_selected_resources", sel, data_type="json")            # global
 _store_data("security_skip_run", "0", run_based=True, data_type="string")  # as the start node sets
 _store_data("security_candidates", [], run_based=True, data_type="json")
+if LEDGER_FILE and os.path.exists(LEDGER_FILE):
+    _store[("security_findings", False)] = json.load(open(LEDGER_FILE))     # seed prior ledger (global)
+    print(f"[security-e2e] loaded ledger: {len(_store[('security_findings', False)])} prior finding(s)")
 
 waveassist.call_llm = _local_call_llm
 waveassist.fetch_data = _fetch
@@ -162,4 +168,7 @@ print(f"\n[security-e2e] total candidates: {len(after_audit)} | "
       f"ledger entries: {len(_fetch('security_findings', default={}) or {})}")
 print(f"[security-e2e] email {'SENT to project owner' if SEND else 'PREVIEW (not sent)'} — content:\n")
 print(_html.unescape(_re.sub(r'<[^>]+>', '', disp)).strip() or "(no email content — nothing to report)")
-print(f"\n[security-e2e] done — nothing written to the project; no GitHub writes.")
+if LEDGER_FILE:
+    json.dump(_fetch("security_findings", default={}) or {}, open(LEDGER_FILE, "w"))
+    print(f"[security-e2e] saved ledger to {LEDGER_FILE}")
+print(f"\n[security-e2e] done; nothing written to the project; no GitHub writes.")

@@ -15,6 +15,7 @@ last node in the chain.
 Conventions: flat script, no __main__ guard, init() first, no sibling imports (lock_is_active /
 finding_sig are duplicated by design), fall-through on empty.
 """
+import re
 import html
 import hashlib
 from datetime import datetime, timezone
@@ -212,6 +213,15 @@ def build_subject(findings):
     return f"GitZoid Security: {count} in {where}"
 
 
+def parse_recipients(value):
+    """Parse a comma/semicolon/space separated email string into a clean list (best-effort). These
+    are CC'd on security alerts; the account owner is always the primary recipient via the SDK."""
+    if not value:
+        return []
+    parts = re.split(r"[,;\s]+", str(value).strip())
+    return [p for p in parts if "@" in p and "." in p.split("@")[-1]]
+
+
 def release_run_lock():
     """Release the security lock only if THIS run owns it (token match)."""
     my_token = waveassist.fetch_data("security_run_lock_token", run_based=True, default="") or ""
@@ -247,9 +257,12 @@ if not skip:
         ranked = rank_findings(to_alert)[:MAX_ALERTS]
         subject = build_subject(ranked)
         email_html = build_alert_email(ranked, scanned_repos)
+        # Owner is always the primary recipient (SDK); configured extras are CC'd.
+        cc = parse_recipients(waveassist.fetch_data("security_recipients", default="") or "")
         if not preview:
             try:
-                waveassist.send_email(subject=subject, html_content=email_html, raise_on_failure=False)
+                waveassist.send_email(subject=subject, html_content=email_html,
+                                      cc=cc or None, raise_on_failure=False)
             except Exception as e:
                 print(f"⚠️ security alert email failed: {e}")
         waveassist.store_data("display_output", {"html_content": email_html},

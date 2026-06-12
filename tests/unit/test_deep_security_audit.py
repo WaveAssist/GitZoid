@@ -23,17 +23,29 @@ from deep_security_audit import (
 
 
 class TestNeedsAudit:
-    def test_missing_state_needs_audit(self):
+    NOW = datetime(2026, 6, 17, 8, 0, tzinfo=timezone.utc)   # a Wednesday (weekday 2)
+
+    def test_first_run_always_audits(self):
         assert needs_audit({}) is True
         assert needs_audit(None) is True
 
-    def test_recent_audit_skips(self):
-        recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
-        assert needs_audit({"last_audit_at": recent}) is False
+    def test_already_audited_today_skips(self):
+        entry = {"last_audit_at": self.NOW.isoformat()}
+        assert needs_audit(entry, now=self.NOW, audit_weekday=self.NOW.weekday()) is False
 
-    def test_old_audit_runs(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
-        assert needs_audit({"last_audit_at": old}) is True
+    def test_runs_on_configured_weekday(self):
+        entry = {"last_audit_at": (self.NOW - timedelta(days=3)).isoformat()}
+        assert needs_audit(entry, now=self.NOW, audit_weekday=self.NOW.weekday()) is True
+
+    def test_skips_on_off_weekday_within_window(self):
+        entry = {"last_audit_at": (self.NOW - timedelta(days=2)).isoformat()}
+        other = (self.NOW.weekday() + 1) % 7
+        assert needs_audit(entry, now=self.NOW, audit_weekday=other) is False
+
+    def test_safety_net_runs_after_long_gap(self):
+        entry = {"last_audit_at": (self.NOW - timedelta(days=9)).isoformat()}
+        other = (self.NOW.weekday() + 1) % 7
+        assert needs_audit(entry, now=self.NOW, audit_weekday=other) is True
 
     def test_malformed_timestamp_runs(self):
         assert needs_audit({"last_audit_at": "garbage"}) is True

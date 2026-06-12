@@ -18,7 +18,19 @@ from triage_and_alert import (
     lock_is_active,
     build_alert_email,
     build_subject,
+    parse_recipients,
 )
+
+
+class TestRecipients:
+    def test_parses_comma_and_space_separated(self):
+        assert parse_recipients("a@x.com, b@y.com") == ["a@x.com", "b@y.com"]
+        assert parse_recipients("a@x.com b@y.com;c@z.com") == ["a@x.com", "b@y.com", "c@z.com"]
+
+    def test_empty_and_invalid(self):
+        assert parse_recipients("") == []
+        assert parse_recipients(None) == []
+        assert parse_recipients("notanemail, also-bad") == []
 
 EMOJI = "🛡️🔴🟡🔵⚪🚀💡🐛🔒✅⚠️→·—"
 
@@ -193,9 +205,11 @@ class TestDriver:
                  "actively_exploited": True}]
         stored, sent = self._run(monkeypatch, {
             "security_skip_run": "0", "security_candidates": cand,
-            "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
+            "security_findings": {}, "github_selected_resources": [{"id": "o/r"}],
+            "security_recipients": "lead@acme.com, sec@acme.com"})
         assert len(sent) == 1
         assert "GitZoid Security" in sent[0]["subject"]
+        assert sent[0]["cc"] == ["lead@acme.com", "sec@acme.com"]   # extras CC'd; owner is primary
         assert "security_findings" in stored
         assert stored["security_findings"][finding_sig(cand[0])]["status"] == "open"
 
