@@ -11,6 +11,15 @@ PROCESSING_TIME_PER_PR = 2
 waveassist.init()
 
 
+def _flag_is_set(value):
+    """Parse a run-based flag from the store. The SDK serialises a JSON-stored scalar as
+    {"value": "True"/"False"} and returns that DICT, so a bare bool(...) is ALWAYS truthy — unwrap
+    and compare the string. Accepts raw bools too."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
 def _has_next_page(resp) -> bool:
     """Defensive Link-header 'next' check. A non-dict .links (e.g. a bare test Mock) means
     'no next page', so legacy single-response mocks stay single-page instead of looping forever."""
@@ -340,7 +349,7 @@ def fetch_and_process_prs(
 
 # Single-run lock (set by check_credits_and_init): if another run holds it, no-op (empty repo list
 # means no PRs are queued, so generate_review / post_comment downstream also no-op).
-skip_run = bool(waveassist.fetch_data("skip_run", default=False))
+skip_run = _flag_is_set(waveassist.fetch_data("skip_run", run_based=True, default=False))
 if skip_run:
     print("GitZoid: skip_run set; fetch_pull_requests no-op (another run in progress).")
 

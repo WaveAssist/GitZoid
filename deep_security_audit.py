@@ -28,6 +28,15 @@ waveassist.init()   # credits gated once upstream in security_check_and_init
 
 print("Processing GitZoid deep security audit (deep_security_audit) node")
 
+
+def _flag_is_set(value):
+    """Parse a run-based flag from the store. The SDK serialises a JSON-stored scalar as
+    {"value": "True"/"False"} and returns that DICT, so a bare bool(...) is ALWAYS truthy — unwrap
+    and compare the string. Accepts raw bools too."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    return str(value).strip().lower() in ("true", "1", "yes")
+
 GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.15
@@ -254,7 +263,7 @@ def run_audit(model_name, repo_path, brain_profile, files):
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
-skip = bool(waveassist.fetch_data("security_skip_run", default=False))
+skip = _flag_is_set(waveassist.fetch_data("security_skip_run", run_based=True, default=False))
 repositories = [] if skip else (waveassist.fetch_data("github_selected_resources", default=[]) or [])
 
 if skip:
@@ -302,7 +311,7 @@ if repositories:
 
     waveassist.store_data("security_audit_state", audit_state, data_type="json")
     waveassist.store_data("security_audit_queue", queue, data_type="json")   # consumed entries removed
-    existing = waveassist.fetch_data("security_candidates", default=[]) or []
+    existing = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []
     waveassist.store_data("security_candidates", existing + candidates,
                           run_based=True, data_type="json")
     print(f"GitZoid Security: deep_security_audit produced {len(candidates)} candidate(s).")
