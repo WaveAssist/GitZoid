@@ -346,11 +346,17 @@ def collect_queue_files(queue, repo_path):
 
 
 def _route_dedup_key(entry_point):
-    """A STABLE identity for an authz finding: the route path(s) it names, not the model's prose
-    (which varies week to week). So the same bug keeps one identity and is not re-alerted."""
-    routes = re.findall(r"/[A-Za-z0-9_]{2,}[A-Za-z0-9_./-]*", entry_point or "")
+    """A STABLE identity for an authz finding: the set of ROUTE paths it names, lowercased and sorted,
+    not the model's prose (which varies run to run). File-path tokens are excluded (anything with a
+    dot, e.g. 'Admin/Controllers/x.py') so the key does not drift when the model sometimes appends
+    'in <controller>.py' and sometimes does not."""
+    routes = set()
+    for t in re.findall(r"/[A-Za-z0-9_./-]+", entry_point or ""):
+        t = t.rstrip("./-,);").lower()
+        if t and "." not in t:                       # drop file paths; keep real route paths
+            routes.add(t)
     if routes:
-        return ",".join(sorted(set(routes)))
+        return ",".join(sorted(routes))
     return " ".join((entry_point or "").lower().split())[:60]
 
 

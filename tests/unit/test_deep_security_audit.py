@@ -17,9 +17,29 @@ from deep_security_audit import (
     gather_candidates,
     pack_to_budget,
     audit_gate,
+    _route_dedup_key,
     AuditResult,
     AuthzFinding,
 )
+
+
+class TestRouteDedupKey:
+    """The authz dedup key must be STABLE when the model rewords the entry point — in particular it
+    must ignore the controller file path that the model sometimes appends and sometimes omits."""
+
+    def test_stable_across_file_suffix(self):
+        with_file = "POST /acl/list_records (and POST /acl/model_check) in Admin/Controllers/admin_access_controller.py"
+        no_file = "POST /acl/list_records (and POST /acl/model_check)."
+        assert _route_dedup_key(with_file) == _route_dedup_key(no_file)
+        assert _route_dedup_key(with_file) == "/acl/list_records,/acl/model_check"
+
+    def test_order_independent(self):
+        a = _route_dedup_key("POST /acl/model_check, POST /acl/list_records")
+        b = _route_dedup_key("POST /acl/list_records, POST /acl/model_check")
+        assert a == b
+
+    def test_differs_by_route(self):
+        assert _route_dedup_key("/acl/list_records") != _route_dedup_key("/admin/coupons/create")
 
 
 class TestNeedsAudit:

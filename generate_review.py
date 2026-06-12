@@ -262,6 +262,7 @@ _REVIEW_RULES = """
     - Avoid ; and - and emdash as much as possible. but not forced. 
     SEVERITY: high=likely runtime bug/data loss/breakage/real security hole; medium=should fix (edge case, weak error handling, convention violation); low=minor/style.
     CATEGORY (findings[] only): bug | security. Put perf/readability in potential_optimizations[] and nits/style in suggestions[], NOT as findings. Use 'security' only for the sweep items below.
+    LIMIT: potential_optimizations[] and suggestions[] are low-priority and mostly unused — emit at most 3 of EACH, only the most useful, and do not pad. Rate findings honestly by the SEVERITY scale; never inflate a minor issue to high just to surface it (a real medium/low belongs in medium/low, or in these two lists).
     SUGGESTION: when a fix is small and unambiguous, include committable code in suggested_replacement; else omit.
     SECURITY SWEEP (light, high-confidence only):
     - Newly ADDED line that looks like a live secret (high-entropy token/key). Skip placeholders/test fixtures/examples.
@@ -570,7 +571,7 @@ to skeptical: it survives only if it genuinely holds against the FULL code below
 FINDING (claimed {finding.get('severity')} {finding.get('category')} at {loc}):
 {finding.get('body')}
 
-FULL SURROUNDING CODE (authoritative — trace it, do not assume):
+SURROUNDING CODE (the full file when available, otherwise the diff — trace it, do not assume):
 ```
 {context_code}
 ```
@@ -589,17 +590,22 @@ def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity
     if not findings:
         return findings, "looks_good", []
     repo_path, head_sha = pr.get("id", ""), pr.get("current_sha", "")
+    patches = {fl.get("filename"): (fl.get("patch") or "") for fl in (pr.get("files") or [])}
     cache, survivors, dropped = {}, [], []
     for f in findings:
         path = f.get("path") or ""
-        if not (token and path):
-            survivors.append(f); continue                       # no context available → fail open
-        if path not in cache:
+        if not path:
+            survivors.append(f); continue                       # unanchored → fail open
+        if token and path not in cache:
             cache[path] = fetch_file_text(repo_path, path, head_sha, token)
-        if not cache[path]:
-            survivors.append(f); continue                       # fetch failed → fail open
+        file_text = cache.get(path) or ""
+        # Full file is best (it sees guards OUTSIDE the diff hunk); fall back to the diff when the
+        # file can't be fetched — weaker, but better than skipping the check entirely.
+        ctx = context_window(file_text, f.get("line")) if file_text else patches.get(path, "")
+        if not ctx:
+            survivors.append(f); continue                       # no context at all → fail open
         verdict = waveassist.call_llm(
-            model=model_name, prompt=get_verify_prompt(f, context_window(cache[path], f.get("line"))),
+            model=model_name, prompt=get_verify_prompt(f, ctx),
             response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
         if verdict is None:
             survivors.append(f); continue                       # LLM unavailable → fail open
@@ -652,6 +658,10 @@ if prs:
                 raise Exception("Review not generated.")
 
             review_dict = result.model_dump()
+            # Low-priority lists are mostly unused downstream — hard-cap at 3 each (the prompt asks
+            # for this too; this is the guarantee).
+            review_dict["potential_optimizations"] = (review_dict.get("potential_optimizations") or [])[:3]
+            review_dict["suggestions"] = (review_dict.get("suggestions") or [])[:3]
             diff_lines = build_diff_lines(pr.get("files"))
             raw = (review_dict.get("findings") or []) + security_sweep(pr.get("files"), pr.get("brain_profile"))
             kept, verdict, _ = apply_gate(raw, diff_lines, seen_sigs=set(),

@@ -128,6 +128,16 @@ class TestVerifyPostedFindings:
         assert len(kept) == 1
         assert verdict == "minor_comments"
 
+    def test_diff_fallback_when_full_file_unavailable(self):
+        # Fetch fails, but the PR carries the file's patch → verify still runs on the diff (best-effort).
+        pr = {"id": "owner/repo", "current_sha": "abc",
+              "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n+bad line"}]}
+        with patch.object(gr, "fetch_file_text", return_value=""), \
+             patch.object(gr.waveassist, "call_llm", return_value=_verdict(False)) as llm:
+            kept, _, dropped = verify_posted_findings([_F()], pr, "tok", "m", DL)
+        llm.assert_called_once()                      # ran via diff fallback, not skipped
+        assert kept == [] and len(dropped) == 1
+
     def test_file_fetched_once_per_path(self):
         # Two findings, same file → one fetch (cache).
         with patch.object(gr, "fetch_file_text", return_value="code") as fx, \
