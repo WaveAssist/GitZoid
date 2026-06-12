@@ -46,6 +46,37 @@ nodes:
     run_after:
       - generate_review
 
+  # ---- Security Watch chain (Phase B) ----
+  # A SEPARATE disconnected subgraph with its OWN daily clock, so the (slow, weekly) deep audit never
+  # holds the 2-min review lock. One starting node per connected subgraph — the review chain above and
+  # this security chain are independent, which the platform supports. deep_security_audit self-throttles
+  # to weekly per repo; triage_and_alert is the single gate + alert path and releases security_run_lock.
+  - key: security_check_and_init
+    name: SecurityCheckAndInit
+    file_name: security_check_and_init.py
+    starting_node: true
+    schedule:
+      cron: "0 6 * * *"   # daily at 06:00 UTC
+      timezone: "UTC"
+
+  - key: scan_dependencies
+    name: ScanDependencies
+    file_name: scan_dependencies.py
+    run_after:
+      - security_check_and_init
+
+  - key: deep_security_audit
+    name: DeepSecurityAudit
+    file_name: deep_security_audit.py
+    run_after:
+      - scan_dependencies
+
+  - key: triage_and_alert
+    name: TriageAndAlert
+    file_name: triage_and_alert.py
+    run_after:
+      - deep_security_audit
+
 variables:
   - type: github
     name: github
@@ -85,6 +116,21 @@ variables:
         key: openai/gpt-5.2
       - name: Minimax M2.5
         key: minimax/minimax-m2.5
+
+  # Security Watch toggle. Default ON (existing + new users). Turning it off skips the whole security
+  # chain cleanly (no failed runs). The daily scan is silent unless it finds something real.
+  - name: enable_security
+    key: enable_security
+    display_name: Security Watch
+    type: select
+    is_optional: true
+    default_value: "true"
+    helper_message: "Daily dependency & supply-chain watch plus a weekly deep code audit. Silent unless it finds a real, exploitable issue."
+    options:
+      - name: "On"
+        key: "true"
+      - name: "Off"
+        key: "false"
 
   - name: schedule
     key: schedule

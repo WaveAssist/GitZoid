@@ -10,6 +10,7 @@ the verdict. Conventions: flat script, no __main__ guard, init() first, fall-thr
 import hashlib
 import re
 import waveassist
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -153,6 +154,41 @@ def brain_auth_files(profile):
         role = (kf.get("role") or "").lower()
         if path and (any(h in path.lower() for h in _AUTH_HINTS) or any(h in role for h in _AUTH_HINTS)):
             out.add(path)
+    return out
+
+
+def auth_touched_files(files, brain_profile):
+    """Paths among the PR's changed files that match an auth-flagged file in the brain (by full path
+    or basename). These get queued for the weekly deep_security_audit."""
+    auth = brain_auth_files(brain_profile)
+    auth_bases = {a.split("/")[-1] for a in auth}
+    out = []
+    for f in (files or []):
+        fn = f.get("filename", "")
+        if not fn:
+            continue
+        if fn in auth or fn.split("/")[-1] in auth_bases:
+            out.append(fn)
+    return out
+
+
+def build_audit_queue_entry(repo_path, pr_number, files, current_sha, brain_profile):
+    """Build a tripwire queue entry for a PR that touched auth files, or None. The weekly audit
+    consumes these and prioritizes the named files."""
+    touched = auth_touched_files(files, brain_profile)
+    if not touched:
+        return None
+    return {"repo": repo_path, "pr": pr_number, "files": touched, "sha": current_sha,
+            "queued_at": datetime.now(timezone.utc).isoformat()}
+
+
+def merge_audit_queue(queue, entry):
+    """Upsert a queue entry by (repo, pr) — the latest push for a PR replaces its prior entry."""
+    if not entry:
+        return queue or []
+    key = (entry.get("repo"), entry.get("pr"))
+    out = [q for q in (queue or []) if (q.get("repo"), q.get("pr")) != key]
+    out.append(entry)
     return out
 
 
@@ -471,6 +507,7 @@ if prs:
     repo_config = {r["id"]: r.get("properties", {}) for r in repositories if isinstance(r, dict) and r.get("id")}
     global_model = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL
     global_context = waveassist.fetch_data("additional_context", default="") or ""
+    audit_queue_entries = []   # PRs touching auth files → queued for the weekly deep_security_audit
 
     for pr in prs:
         try:
@@ -511,6 +548,13 @@ if prs:
 
             pr.update(review_dict=review_dict, comment_generated=True,
                       comment_posted=False, review_type=review_type)
+
+            # Tripwire: if this PR touched an auth-flagged file, queue it for the weekly deep audit
+            # (closes the "deferred to the weekly audit" promise the security sweep already prints).
+            entry = build_audit_queue_entry(repo_path, pr.get("pr_number"), pr.get("files"),
+                                            pr.get("current_sha", ""), pr.get("brain_profile"))
+            if entry:
+                audit_queue_entries.append(entry)
             print(f"✅ PR #{pr.get('pr_number')} {review_type} review generated "
                   f"(model={model_name}, verdict={verdict}, findings={len(kept)}).")
         except Exception as e:
@@ -518,4 +562,12 @@ if prs:
             pr.update(review_dict={}, comment_generated=False, comment_posted=False)
 
     waveassist.store_data("pull_requests", prs, data_type="json")
+
+    # Persist the audit tripwire queue for the weekly deep_security_audit (additive; merges by PR).
+    if audit_queue_entries:
+        queue = waveassist.fetch_data("security_audit_queue", default=[]) or []
+        for entry in audit_queue_entries:
+            queue = merge_audit_queue(queue, entry)
+        waveassist.store_data("security_audit_queue", queue, data_type="json")
+        print(f"Queued {len(audit_queue_entries)} auth-touched PR(s) for the weekly deep audit.")
     print("All PR reviews processed and stored.")
