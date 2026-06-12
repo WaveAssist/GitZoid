@@ -16,7 +16,41 @@ from triage_and_alert import (
     reconcile_ledger,
     rank_findings,
     lock_is_active,
+    build_alert_email,
+    build_subject,
 )
+
+EMOJI = "🛡️🔴🟡🔵⚪🚀💡🐛🔒✅⚠️→·—"
+
+
+class TestCleanOutput:
+    """A security email must read clean and serious: no emoji, no em dashes."""
+
+    def _findings(self):
+        return [
+            {"category": "dependency", "repo": "o/r", "name": "litellm", "version": "1.0",
+             "vuln_id": "CVE-1", "severity": "high", "fix": "1.1", "impact": "leaks keys",
+             "actively_exploited": True},
+            {"category": "authz", "repo": "o/r", "title": "Bypassable check: /acl/list",
+             "severity": "high", "named_victim": "any user", "fix": "add authorize_admin",
+             "impact": "reads any user's data", "entry_point": "/acl/list"},
+        ]
+
+    def test_email_has_no_emoji_or_emdash(self):
+        out = build_alert_email(self._findings(), scanned_repos=1)
+        for ch in EMOJI:
+            assert ch not in out, f"email should not contain {ch!r}"
+
+    def test_subject_has_no_emoji(self):
+        subj = build_subject(self._findings())
+        for ch in EMOJI:
+            assert ch not in subj
+        assert "GitZoid Security" in subj
+
+    def test_email_still_shows_fix_and_severity(self):
+        out = build_alert_email(self._findings(), scanned_repos=1)
+        assert "Fix:" in out
+        assert "Severity: High" in out
 
 
 def _dep(repo="o/r", name="litellm", title="rce in litellm", severity="high",
@@ -37,6 +71,19 @@ class TestFindingSig:
 
     def test_differs_by_package(self):
         assert finding_sig(_dep(name="a")) != finding_sig(_dep(name="b"))
+
+    def test_code_finding_stable_across_reworded_prose(self):
+        # Same authz bug (same routes) described differently week to week → SAME identity via dedup_key.
+        a = {"category": "authz", "repo": "o/r", "dedup_key": "authz:/acl/list_records",
+             "title": "Bypassable check: POST /acl/list_records (and 3 siblings)"}
+        b = {"category": "authz", "repo": "o/r", "dedup_key": "authz:/acl/list_records",
+             "title": "Missing authorize_admin on /acl/list_records — reads any user's data"}
+        assert finding_sig(a) == finding_sig(b)
+
+    def test_code_finding_differs_by_location(self):
+        a = {"category": "authz", "repo": "o/r", "dedup_key": "authz:/acl/list_records"}
+        b = {"category": "authz", "repo": "o/r", "dedup_key": "authz:/admin/coupons/create"}
+        assert finding_sig(a) != finding_sig(b)
 
 
 class TestEscalation:
@@ -148,7 +195,7 @@ class TestDriver:
             "security_skip_run": "0", "security_candidates": cand,
             "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
         assert len(sent) == 1
-        assert "🛡️" in sent[0]["subject"]
+        assert "GitZoid Security" in sent[0]["subject"]
         assert "security_findings" in stored
         assert stored["security_findings"][finding_sig(cand[0])]["status"] == "open"
 

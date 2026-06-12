@@ -19,6 +19,7 @@ concrete backdoor signals — at high confidence. Survivors are appended to the 
 Conventions: flat script, no __main__ guard, init() first, no sibling imports, fall-through on
 empty. Every external call has a timeout; one bad repo never sinks the batch.
 """
+import re
 import time
 import base64
 from datetime import datetime, timezone
@@ -242,6 +243,11 @@ below. You are NOT reviewing style or general bugs. Find only issues that are re
 - Never guess. Never report "could be" or "might be". No finding without a concrete exploit/impact.
 - confidence is "high" ONLY when you are certain it is exploitable. Lower confidence findings are dropped.
 - Neutral, plain English. Describe who is harmed and how. No CVE/jargon padding.
+- Do not overstate access barriers: say "unauthenticated" ONLY if the route truly needs no credential
+  of any kind. If a shared/system token or any auth gate exists, say "without the per-user authorization
+  check" instead.
+- Writing style: plain prose in short sentences. Do NOT use em dashes, and do not use a hyphen as a
+  connector between clauses. No emojis.
 </hard_rules>
 <files note="The security-critical files of this repo. Audit ONLY these.">
 {files_xml}
@@ -333,8 +339,18 @@ def collect_queue_files(queue, repo_path):
     return uniq, remaining
 
 
+def _route_dedup_key(entry_point):
+    """A STABLE identity for an authz finding: the route path(s) it names, not the model's prose
+    (which varies week to week). So the same bug keeps one identity and is not re-alerted."""
+    routes = re.findall(r"/[A-Za-z0-9_]{2,}[A-Za-z0-9_./-]*", entry_point or "")
+    if routes:
+        return ",".join(sorted(set(routes)))
+    return " ".join((entry_point or "").lower().split())[:60]
+
+
 def run_audit(model_name, repo_path, brain_profile, files):
-    """One model call; gate the results. Returns a list of candidate findings (gated)."""
+    """One model call; gate the results. Returns a list of candidate findings (gated). Each carries a
+    stable `dedup_key` (location-based) so triage dedupes it across runs regardless of wording."""
     try:
         result = waveassist.call_llm(model=model_name, prompt=build_audit_prompt(repo_path, brain_profile, files),
                                      response_model=AuditResult, should_retry=True, max_tokens=MAX_AUDIT_TOKENS)
@@ -347,17 +363,20 @@ def run_audit(model_name, repo_path, brain_profile, files):
     for f in result.authz_findings:
         d = f.model_dump(); d.update({"category": "authz", "repo": repo_path,
                                       "title": f"Bypassable check: {f.entry_point}",
-                                      "entry_point": f.entry_point, "path": "", "severity": "high"})
+                                      "entry_point": f.entry_point, "path": "", "severity": "high",
+                                      "dedup_key": "authz:" + _route_dedup_key(f.entry_point)})
         if audit_gate(d):
             out.append(d)
     for f in result.secret_findings:
         d = f.model_dump(); d.update({"category": "secret", "repo": repo_path,
-                                      "title": f"Live secret in {f.path}", "severity": "high"})
+                                      "title": f"Live secret in {f.path}", "severity": "high",
+                                      "dedup_key": "secret:" + (f.path or "")})
         if audit_gate(d):
             out.append(d)
     for f in result.backdoor_findings:
         d = f.model_dump(); d.update({"category": "backdoor", "repo": repo_path,
-                                      "title": f"Suspicious code in {f.path}", "severity": "high"})
+                                      "title": f"Suspicious code in {f.path}", "severity": "high",
+                                      "dedup_key": "backdoor:" + (f.path or "")})
         if audit_gate(d):
             out.append(d)
     return out

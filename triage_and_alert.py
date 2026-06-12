@@ -47,14 +47,21 @@ def _norm(s):
 
 
 def finding_sig(f) -> str:
-    """Position-independent identity shared by every security source. A dependency finding is keyed
-    by package + the vuln id (or its normalized title if no id); a code finding by its location +
-    normalized title. So the same root issue keeps one identity across runs and sources."""
+    """Position-independent identity shared by every security source, kept STABLE across re-runs.
+    Dependency findings key on package + vuln id. Code findings (authz/secret/backdoor) carry an
+    explicit `dedup_key` built from their location (route paths / file) rather than the model's prose,
+    so the same bug keeps one identity even when the model rewords it week to week. Falls back to
+    location + normalized title only when no stable key is available."""
     cat = f.get("category", "")
     repo = f.get("repo", "")
-    key = f.get("name") or f.get("path") or f.get("entry_point") or ""
-    ident = f.get("vuln_id") or _norm(f.get("title") or f.get("summary") or "")
-    return hashlib.sha1(f"{cat}|{repo}|{key}|{ident}".encode()).hexdigest()[:12]
+    explicit = f.get("dedup_key")
+    if explicit:
+        raw = f"{cat}|{repo}|{explicit}"
+    else:
+        key = f.get("name") or f.get("path") or f.get("entry_point") or ""
+        ident = f.get("vuln_id") or _norm(f.get("title") or f.get("summary") or "")
+        raw = f"{cat}|{repo}|{key}|{ident}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
 def should_escalate(prior: dict, new: dict) -> bool:
@@ -136,61 +143,73 @@ def rank_findings(findings):
 
 
 # ---------------------------------------------------------------- email rendering (deterministic)
+# A security alert reads clean and serious: no emoji, no em dashes, plain prose. Severity is plain
+# text; a coloured left border carries the visual weight.
 
-_SEV_BADGE = {"critical": "🔴 Critical", "high": "🔴 High", "medium": "🟡 Medium",
-              "low": "🔵 Low", "unknown": "⚪ Unknown"}
+_SEV_LABEL = {"critical": "Critical", "high": "High", "medium": "Medium",
+              "low": "Low", "unknown": "Unknown"}
+
+
+def _meta_line(parts):
+    """Join header bits with a clean separator (no middot, no em dash)."""
+    return " &nbsp;|&nbsp; ".join(p for p in parts if p)
 
 
 def _finding_block(f) -> str:
     repo = html.escape(str(f.get("repo") or ""))
-    sev = _SEV_BADGE.get(f.get("severity"), "")
-    kev = " · <b>actively exploited in the wild</b>" if f.get("actively_exploited") else ""
+    sev = _SEV_LABEL.get(f.get("severity"), "")
+    kev = "<b>Actively exploited in the wild</b>" if f.get("actively_exploited") else ""
     impact = html.escape(str(f.get("impact") or ""))
     if f.get("category") == "dependency":
         pkg = html.escape(f"{f.get('name') or ''} {f.get('version') or ''}".strip())
         fix = f.get("fix") or f.get("fixed")
-        fix_line = (f"<div style='color:#1b5e20'>→ Fix: upgrade {html.escape(pkg.split(' ')[0])} "
+        fix_line = (f"<div style='color:#1b5e20;margin-top:4px'>Fix: upgrade {html.escape(pkg.split(' ')[0])} "
                     f"to {html.escape(str(fix))}.</div>") if fix else \
-                   "<div style='color:#8a6d3b'>→ No fixed version published yet.</div>"
+                   "<div style='color:#8a6d3b;margin-top:4px'>No fixed version is published yet.</div>"
         ref = f.get("vuln_id") or ", ".join(f.get("aliases") or [])
-        ref_line = f"<div style='color:#888;font-size:11px'>Ref: {html.escape(str(ref))}</div>" if ref else ""
-        return (f"<div style='margin:10px 0;padding:10px 12px;border-left:3px solid #b91c1c;background:#fbf6f6'>"
-                f"<div><b>{html.escape(repo)}</b> — {pkg} · {sev}{kev}</div>"
-                f"<div style='margin:4px 0'>{impact}</div>{fix_line}{ref_line}</div>")
+        ref_line = f"<div style='color:#888;font-size:11px;margin-top:4px'>Reference: {html.escape(str(ref))}</div>" if ref else ""
+        header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
+        return (f"<div style='margin:12px 0;padding:11px 13px;border-left:4px solid #b91c1c;background:#fbf6f6'>"
+                f"<div>{header}</div>"
+                f"<div style='font-weight:600;margin-top:3px'>{pkg}</div>"
+                f"<div style='margin-top:4px'>{impact}</div>{fix_line}{ref_line}</div>")
     # code finding (authz / secret / backdoor)
     title = html.escape(str(f.get("title") or f.get("category")))
     victim = html.escape(str(f.get("named_victim") or ""))
     fix = html.escape(str(f.get("fix") or ""))
     where = html.escape(str(f.get("path") or f.get("entry_point") or ""))
-    victim_line = f"<div>Who's affected: {victim}</div>" if victim else ""
-    fix_line = f"<div style='color:#1b5e20'>→ Fix: {fix}</div>" if fix else ""
-    where_line = f"<div style='color:#888;font-size:11px'>{where}</div>" if where else ""
-    return (f"<div style='margin:10px 0;padding:10px 12px;border-left:3px solid #b91c1c;background:#fbf6f6'>"
-            f"<div><b>{html.escape(repo)}</b> — {title} · {sev}{kev}</div>"
-            f"<div style='margin:4px 0'>{impact}</div>{victim_line}{fix_line}{where_line}</div>")
+    victim_line = f"<div style='margin-top:4px'>Who is affected: {victim}</div>" if victim else ""
+    fix_line = f"<div style='color:#1b5e20;margin-top:4px'>Fix: {fix}</div>" if fix else ""
+    where_line = f"<div style='color:#888;font-size:11px;margin-top:4px'>Location: {where}</div>" if where else ""
+    header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
+    return (f"<div style='margin:12px 0;padding:11px 13px;border-left:4px solid #b91c1c;background:#fbf6f6'>"
+            f"<div>{header}</div>"
+            f"<div style='font-weight:600;margin-top:3px'>{title}</div>"
+            f"<div style='margin-top:4px'>{impact}</div>{victim_line}{fix_line}{where_line}</div>")
 
 
 def build_alert_email(findings, scanned_repos):
     """Owner-facing HTML for the consolidated alert. findings already ranked + capped."""
     n = len(findings)
-    head = (f"<div style=\"font-family:-apple-system,Segoe UI,sans-serif;padding:16px;line-height:1.5\">"
-            f"<h2 style='margin:0 0 4px'>🛡️ GitZoid Security — {n} issue{'s' if n != 1 else ''} found</h2>"
-            f"<div style='color:#666;font-size:12px'>Reviewed across {scanned_repos} "
-            f"repo{'s' if scanned_repos != 1 else ''}. Only real, exploitable issues are shown.</div>")
+    head = (f"<div style=\"font-family:-apple-system,Segoe UI,sans-serif;padding:16px;line-height:1.5;color:#1f2937\">"
+            f"<h2 style='margin:0 0 4px;font-size:18px'>GitZoid Security Review</h2>"
+            f"<div style='color:#666;font-size:12px'>{n} issue{'s' if n != 1 else ''} found across {scanned_repos} "
+            f"repositor{'ies' if scanned_repos != 1 else 'y'}. Only real, exploitable issues are shown.</div>")
     body = "".join(_finding_block(f) for f in findings)
     foot = ("<div style='margin-top:14px;color:#888;font-size:11px'>"
-            "GitZoid stays silent unless it finds something real. "
-            "You will not be re-alerted about an issue you've already seen.</div></div>")
+            "GitZoid stays silent unless it finds something real, and will not re-alert you about an "
+            "issue you have already seen.</div></div>")
     return head + body + foot
 
 
 def build_subject(findings):
     top = findings[0]
     where = top.get("repo") or "your repos"
+    n = len(findings)
+    count = f"{n} issues" if n != 1 else "1 issue"
     if top.get("actively_exploited"):
-        return f"🛡️ GitZoid Security: actively-exploited issue in {where}"
-    sev = top.get("severity", "")
-    return f"🛡️ GitZoid Security: {sev} issue in {where}" if sev else f"🛡️ GitZoid Security: issue in {where}"
+        return f"GitZoid Security: actively exploited issue in {where}"
+    return f"GitZoid Security: {count} in {where}"
 
 
 def release_run_lock():

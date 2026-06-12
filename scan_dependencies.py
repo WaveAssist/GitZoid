@@ -377,6 +377,8 @@ plain English a busy engineer instantly understands.
 - If it's confirmed exploited in the wild, it is almost always a real risk.
 - impact: plain English, who is affected and what an attacker gains. No CVE ids, no CVSS, no jargon.
 - Do not restate the package name and version mechanically; describe the danger.
+- Writing style: plain prose in short sentences. Do NOT use em dashes, and do not use a hyphen as a
+  connector between clauses. No emojis.
 </rules>"""
 
 
