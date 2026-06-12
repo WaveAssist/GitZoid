@@ -80,7 +80,7 @@ def should_escalate(prior: dict, new: dict) -> bool:
 def _entry_from(f, sig, now_iso):
     return {"sig": sig, "category": f.get("category"), "repo": f.get("repo"),
             "name": f.get("name"), "path": f.get("path"), "entry_point": f.get("entry_point"),
-            "title": f.get("title"), "vuln_id": f.get("vuln_id"),
+            "title": f.get("title"), "vuln_id": f.get("vuln_id"), "dedup_key": f.get("dedup_key"),
             "severity": f.get("severity"), "fixed": f.get("fixed"),
             "actively_exploited": f.get("actively_exploited", False),
             "impact": f.get("impact") or f.get("summary") or "",

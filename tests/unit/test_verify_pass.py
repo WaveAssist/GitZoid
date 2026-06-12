@@ -128,6 +128,13 @@ class TestVerifyPostedFindings:
         assert len(kept) == 1
         assert verdict == "minor_comments"
 
+    def test_fail_open_when_call_llm_raises(self):
+        # A bad signature / SDK surprise must NOT break the review — keep the finding.
+        with patch.object(gr, "fetch_file_text", return_value="code"), \
+             patch.object(gr.waveassist, "call_llm", side_effect=TypeError("unexpected kwarg")):
+            kept, _, dropped = verify_posted_findings([_F()], PR, "tok", "m", DL)
+        assert len(kept) == 1 and dropped == []
+
     def test_diff_fallback_when_full_file_unavailable(self):
         # Fetch fails, but the PR carries the file's patch → verify still runs on the diff (best-effort).
         pr = {"id": "owner/repo", "current_sha": "abc",

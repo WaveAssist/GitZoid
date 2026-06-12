@@ -98,6 +98,25 @@ class TestFindingSig:
         assert finding_sig(a) != finding_sig(b)
 
 
+class TestAuthzDedupAcrossRuns:
+    """End-to-end: the SAME authz bug, reworded by the model on a later run, must not re-alert."""
+
+    def test_reworded_authz_not_realerted(self):
+        run1 = [{"category": "authz", "repo": "o/r", "dedup_key": "authz:/acl/list_records",
+                 "title": "Bypassable check: /acl/list_records in Admin/Controllers/x.py",
+                 "severity": "high", "impact": "reads any user data"}]
+        ledger, alerted1, _ = reconcile_ledger({}, run1)
+        assert len(alerted1) == 1                          # first time → alert
+
+        run2 = [{"category": "authz", "repo": "o/r", "dedup_key": "authz:/acl/list_records",
+                 "title": "Missing authorize_admin on /acl/list_records",   # reworded
+                 "severity": "high", "impact": "reads any user data"}]
+        ledger2, alerted2, resolved = reconcile_ledger(ledger, run2)
+        assert alerted2 == []                              # same dedup_key → suppressed
+        assert resolved == []                              # still present, not resolved
+        assert len(ledger2) == 1                           # no duplicate entry
+
+
 class TestEscalation:
     def test_severity_increase_escalates(self):
         prior = {"severity": "high", "fixed": None}

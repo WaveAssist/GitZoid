@@ -604,12 +604,18 @@ def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity
         ctx = context_window(file_text, f.get("line")) if file_text else patches.get(path, "")
         if not ctx:
             survivors.append(f); continue                       # no context at all → fail open
-        verdict = waveassist.call_llm(
-            model=model_name, prompt=get_verify_prompt(f, ctx),
-            response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
-        if verdict is None:
-            survivors.append(f); continue                       # LLM unavailable → fail open
-        v = verdict.model_dump()
+        # Any failure here (LLM down, unexpected return, bad signature) fails OPEN — the finding is
+        # kept and the PR review proceeds. Verification must never be able to break a review.
+        try:
+            verdict = waveassist.call_llm(
+                model=model_name, prompt=get_verify_prompt(f, ctx),
+                response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
+            v = verdict.model_dump() if verdict is not None else None
+        except Exception as e:
+            print(f"   verify: error on {f.get('path')}:{f.get('line')} ({e}) — keeping finding.")
+            v = None
+        if not v:
+            survivors.append(f); continue                       # unavailable/error → fail open
         if not v.get("is_real"):
             dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue
         # Verified real → trust the re-judged severity, and treat confidence as high.
