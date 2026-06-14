@@ -31,6 +31,23 @@ CREDITS_NEEDED_FOR_RUN = 0.3
 RUN_LOCK_KEY = "security_run_lock"
 LOCK_TTL_SECONDS = 2700   # 45 min
 
+# Upfront progress-bar budget (seconds), mirroring the Review gate so the dashboard bar shows from
+# second 0. The weekly deep audit dominates a security run (one large-context LLM call per repo), so
+# budget per repo for a possible audit. Over-estimating is safe: the frontend caps the bar at 80%.
+# Note: for large fleets the deep audit self-throttles at its own 1200s/run budget and rolls the
+# remainder to the next daily tick, so this estimate can exceed a single run's real duration past
+# ~12 repos — that just means the bar fills slowly, never that it stalls.
+SECURITY_SECONDS_PER_REPO = 100   # budget for a possible weekly deep audit, per repo
+SECURITY_BASE_SECONDS = 10        # small base for the daily dependency scan + triage
+
+
+def estimate_time_to_process(num_repos: int) -> int:
+    """Upfront seconds estimate for the whole security chain, covering a possible weekly deep audit.
+    Over-estimating is safe: the frontend caps the bar at 80%."""
+    if not isinstance(num_repos, int) or num_repos < 0:
+        num_repos = 0
+    return num_repos * SECURITY_SECONDS_PER_REPO + SECURITY_BASE_SECONDS
+
 
 def lock_is_active(lock, now=None) -> bool:
     """A security run is in progress iff a lock exists, has a timestamp, and is younger than the TTL."""
@@ -96,4 +113,9 @@ else:
         # run-based so downstream security nodes in THIS run know they hold the lock (and may release it).
         waveassist.store_data("security_run_lock_token", token, run_based=True, data_type="string")
         waveassist.store_data("security_skip_run", "0", run_based=True, data_type="string")
-        print(f"GitZoid Security: credits OK, lock acquired. Scanning {num_repos} repo(s).")
+        # Upfront so the dashboard progress bar shows from second 0, through a possible deep audit.
+        waveassist.store_data("tentative_time_to_process",
+                              str(estimate_time_to_process(num_repos)),
+                              run_based=True, data_type="string")
+        print(f"GitZoid Security: credits OK, lock acquired. Scanning {num_repos} repo(s); "
+              f"est ~{estimate_time_to_process(num_repos)}s.")

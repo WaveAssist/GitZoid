@@ -7,7 +7,14 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
-from security_check_and_init import lock_is_active, security_enabled, LOCK_TTL_SECONDS
+from security_check_and_init import (
+    lock_is_active,
+    security_enabled,
+    estimate_time_to_process,
+    LOCK_TTL_SECONDS,
+    SECURITY_SECONDS_PER_REPO,
+    SECURITY_BASE_SECONDS,
+)
 
 
 class TestLockActive:
@@ -58,6 +65,55 @@ class TestDriverNoOp:
         runpy.run_path("security_check_and_init.py", run_name="__main__")
         assert stored.get("security_skip_run") == "1"
         assert "security_run_lock_token" not in stored   # did not overwrite the held lock
+
+
+class TestEstimateTimeToProcess:
+    """The upfront progress-bar budget, dominated by a possible per-repo deep audit."""
+
+    def test_zero_repos_is_just_base(self):
+        assert estimate_time_to_process(0) == SECURITY_BASE_SECONDS
+
+    def test_scales_per_repo(self):
+        assert estimate_time_to_process(3) == 3 * SECURITY_SECONDS_PER_REPO + SECURITY_BASE_SECONDS
+
+    def test_more_repos_more_time(self):
+        assert estimate_time_to_process(20) > estimate_time_to_process(1)
+
+    def test_bad_input_falls_back_to_base(self):
+        assert estimate_time_to_process(-5) == SECURITY_BASE_SECONDS
+        assert estimate_time_to_process(None) == SECURITY_BASE_SECONDS
+        assert estimate_time_to_process("2") == SECURITY_BASE_SECONDS
+
+
+class TestDriverStoresEstimate:
+    """When the run actually proceeds (credits OK, lock acquired), it must publish the upfront
+    progress-bar budget so the dashboard shows time from second 0. A skipped cycle must NOT."""
+
+    def _run(self, monkeypatch, fetch_map):
+        import runpy, waveassist
+        stored = {}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data",
+                            lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(waveassist, "check_credits_and_notify", lambda *a, **k: True)
+        runpy.run_path("security_check_and_init.py", run_name="__main__")
+        return stored
+
+    def test_proceeding_run_stores_estimate(self, monkeypatch):
+        repos = [{"id": "o/a"}, {"id": "o/b"}]
+        stored = self._run(monkeypatch, {"enable_security": "true",
+                                         "github_selected_resources": repos})
+        assert stored.get("security_skip_run") == "0"          # acquired the lock, proceeding
+        assert stored.get("tentative_time_to_process") == str(estimate_time_to_process(len(repos)))
+
+    def test_skipped_cycle_stores_no_estimate(self, monkeypatch):
+        fresh_lock = {"at": datetime.now(timezone.utc).isoformat(), "token": "other"}
+        stored = self._run(monkeypatch, {"enable_security": "true",
+                                         "github_selected_resources": [{"id": "o/a"}],
+                                         "security_run_lock": fresh_lock})
+        assert stored.get("security_skip_run") == "1"          # overlapping cycle, skipped
+        assert "tentative_time_to_process" not in stored       # no bogus bar for a no-op
 
 
 class TestSecurityEnabled:

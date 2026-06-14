@@ -55,7 +55,7 @@ def lock_is_active(lock, now=None) -> bool:
 
 # Upfront progress-bar budget (seconds). The brain rebuild is the slow, rare part; reviews are
 # refined later by fetch_pull_requests from the real PR count.
-BRAIN_SECONDS_PER_REPO = 45   # budget for a possible weekly brain rebuild, per repo
+BRAIN_SECONDS_PER_REPO = 60   # budget for the per-repo brain build (the slow part of a first run)
 PR_REVIEW_BASE_SECONDS = 10   # small base for the review pipeline (fetch_pull_requests refines it)
 
 
