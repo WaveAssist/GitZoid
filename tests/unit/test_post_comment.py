@@ -242,25 +242,53 @@ class TestReleaseRunLock:
             release_run_lock()
         wa.store_data.assert_not_called()
 
-    def test_skip_run_blocks_release_despite_matching_global_token(self):
-        # run_lock_token is global, so a skipped cycle reads the HOLDER's token and would
-        # match — the run-based skip_run flag must stop it from freeing the holder's lock.
-        wa = self._wa({
-            "skip_run": True,
-            "run_lock_token": "HOLDER",
-            "run_lock": {"at": "now", "token": "HOLDER"},
-        })
+    def test_token_must_be_read_run_based(self):
+        # Regression for the prod bug: the token is WRITTEN run-based by check_credits_and_init,
+        # so it must be READ run-based here. Reading it globally returns a non-existent key and
+        # the lock is never released (only the TTL frees it). This pins run_based=True.
+        wa = self._wa({"run_lock_token": "T1", "run_lock": {"at": "now", "token": "T1"}})
         with patch.object(post_comment, "waveassist", wa):
             release_run_lock()
-        wa.store_data.assert_not_called()
+        token_reads = [c for c in wa.fetch_data.call_args_list
+                       if c.args and c.args[0] == "run_lock_token"]
+        assert token_reads, "release_run_lock must read run_lock_token"
+        assert token_reads[0].kwargs.get("run_based") is True, \
+            "run_lock_token must be read run_based=True to match the run-based write"
 
-    def test_acquiring_cycle_releases_with_skip_run_false(self):
-        # The run that acquired the lock has skip_run=False and a matching global token.
-        wa = self._wa({
-            "skip_run": False,
-            "run_lock_token": "T1",
-            "run_lock": {"at": "now", "token": "T1"},
-        })
-        with patch.object(post_comment, "waveassist", wa):
+
+class TestReleaseRunLockRunBasedScoping:
+    """Faithful model of run-based scoping: the real backend suffixes run-based keys by run_id
+    (global reads of a run-based key miss). A flat mock hid the original prod bug; this models the
+    real isolation and proves the holder releases while a concurrent skipped cycle cannot."""
+
+    def _wa_scoped(self, store, run_id):
+        wa = Mock()
+
+        def fetch(key=None, run_based=False, default=None, **k):
+            real_key = f"{key}_{run_id}" if run_based else key
+            return store.get(real_key, default)
+
+        def put(key=None, data=None, run_based=False, **k):
+            real_key = f"{key}_{run_id}" if run_based else key
+            store[real_key] = data
+            return True
+
+        wa.fetch_data.side_effect = fetch
+        wa.store_data.side_effect = put
+        return wa
+
+    def test_holder_releases_but_skipper_cannot_free_holders_lock(self):
+        # Run A acquired: global lock + run-based token, exactly as check_credits_and_init writes.
+        store = {"run_lock": {"at": "now", "token": "TA"}, "run_lock_token_A": "TA"}
+
+        # Run B is a lock-skip — it never wrote run_lock_token_B. Its post_comment must NOT release.
+        wa_b = self._wa_scoped(store, "B")
+        with patch.object(post_comment, "waveassist", wa_b):
             release_run_lock()
-        wa.store_data.assert_called_once_with("run_lock", {}, data_type="json")
+        assert store["run_lock"] == {"at": "now", "token": "TA"}, "skipper freed the holder's lock"
+
+        # Run A (the holder) releases its own lock.
+        wa_a = self._wa_scoped(store, "A")
+        with patch.object(post_comment, "waveassist", wa_a):
+            release_run_lock()
+        assert store["run_lock"] == {}, "holder failed to release its own lock"

@@ -359,8 +359,9 @@ def needs_rebuild(existing):
 
 # Single-run lock (set by check_credits_and_init): if another run holds it, this cycle is a no-op.
 # Empty repo list short-circuits the loop AND the post-loop stores below, so we never clobber the
-# existing repo_groups / brain.
-skip_run = bool(waveassist.fetch_data("skip_run", default=False))
+# existing repo_groups / brain. Run-based "1"/"0" string written by check_credits_and_init — read it
+# run-based so each run sees its OWN flag (a global read would miss the run-scoped write).
+skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
 if skip_run:
     print("GitZoid: skip_run set; study_repos no-op (another run in progress).")
 

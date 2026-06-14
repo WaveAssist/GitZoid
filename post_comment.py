@@ -346,19 +346,15 @@ if should_process:
 
 
 def release_run_lock():
-    """Release the single-run lock acquired by check_credits_and_init — but only if THIS cycle
-    actually acquired it (a skipped cycle never held the lock) and still owns it (token match),
-    so an overlapping/skipped cycle can never free another run's lock. As the last node in the
-    DAG, reaching here means the run is done; a crashed run leaves the lock to expire via its TTL.
-
-    `run_lock_token` is global (not run-based), so a skipped cycle would read the *holder's*
-    token and wrongly match — the run-based `skip_run` flag is what tells us this cycle skipped,
-    so we must bail out on it BEFORE comparing tokens."""
-    if waveassist.fetch_data("skip_run", run_based=True, default=False):
-        return  # this cycle was a lock-skip — it never held the lock
-    my_token = waveassist.fetch_data("run_lock_token", default="") or ""
+    """Release the single-run lock acquired by check_credits_and_init — but only if THIS run owns
+    it (token match). `run_lock_token` is run-based, so it MUST be read run-based here, matching
+    how check_credits_and_init writes it — only the acquiring run reads back its own token; a
+    skipped/overlapping cycle never wrote one, so under its own run id it reads "" and bails out,
+    and can never free the holder's lock. As the last node in the DAG, reaching here means the run
+    is done; a crashed run leaves the lock to expire via its TTL instead."""
+    my_token = waveassist.fetch_data("run_lock_token", run_based=True, default="") or ""
     if not my_token:
-        return  # no token recorded — nothing to release
+        return  # this cycle didn't acquire the lock (skip or crash) — nothing to release
     lock = waveassist.fetch_data("run_lock", default={}) or {}
     if isinstance(lock, dict) and lock.get("token") == my_token:
         waveassist.store_data("run_lock", {}, data_type="json")

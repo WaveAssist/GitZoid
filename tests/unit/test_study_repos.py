@@ -70,7 +70,7 @@ class TestSkipRunNoOp:
 
     def test_skip_run_does_not_store(self, monkeypatch):
         import runpy, waveassist
-        fetch_map = {"skip_run": True, "github_selected_resources": [{"id": "owner/repo"}],
+        fetch_map = {"skip_run": "1", "github_selected_resources": [{"id": "owner/repo"}],
                      "github_access_token": "tok"}
         stored = {}
         monkeypatch.setattr(waveassist, "fetch_data",
