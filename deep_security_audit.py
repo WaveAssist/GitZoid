@@ -423,6 +423,7 @@ if repositories:
     due.sort(key=lambda r: (audit_state.get(r) or {}).get("last_audit_at", ""))
 
     candidates = []
+    scanned_ok = set()
     started = time.monotonic()
     for repo_path in due:
         if time.monotonic() - started > RUN_TIME_BUDGET_SECONDS:
@@ -455,6 +456,7 @@ if repositories:
             candidates.extend(repo_findings)
             audit_state[repo_path] = {"last_audit_at": datetime.now(timezone.utc).isoformat(),
                                       "last_audit_branch": branch, "last_audit_sha": head_sha}
+            scanned_ok.add(repo_path)   # fully audited this run → triage may resolve its code findings
             print(f"✓ {repo_path}: deep audit done over {len(files)} file(s), {len(repo_findings)} finding(s)")
         except Exception as e:
             print(f"⚠️ deep audit failed for {repo_path}: {e}; skipping repo")
@@ -464,5 +466,11 @@ if repositories:
     waveassist.store_data("security_audit_queue", queue, data_type="json")   # consumed entries removed
     existing = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []
     waveassist.store_data("security_candidates", existing + candidates,
+                          run_based=True, data_type="json")
+    # Publish the repos whose CODE was deep-audited this run so triage can resolve fixed code findings
+    # (authz/secret/backdoor). Kept separate from the daily dependency scan's set so neither class
+    # resolves the other's findings without being re-examined. Merge in case of re-entry.
+    prior_ok = set(waveassist.fetch_data("security_scanned_ok_code", run_based=True, default=[]) or [])
+    waveassist.store_data("security_scanned_ok_code", sorted(prior_ok | scanned_ok),
                           run_based=True, data_type="json")
     print(f"GitZoid Security: deep_security_audit produced {len(candidates)} candidate(s).")

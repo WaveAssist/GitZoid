@@ -17,9 +17,12 @@ from post_comment import (
     reconcile_ledger,
     update_reviewed_prs,
     create_pr_review,
+    create_single_review_comment,
     create_summary_comment,
     edit_summary_comment,
     find_summary_comment_id,
+    process_one_pr,
+    run_driver,
     release_run_lock,
     SUMMARY_MARKER,
 )
@@ -292,3 +295,144 @@ class TestReleaseRunLockRunBasedScoping:
         with patch.object(post_comment, "waveassist", wa_a):
             release_run_lock()
         assert store["run_lock"] == {}, "holder failed to release its own lock"
+
+
+# ---------------------------------------------------------------- robustness (issue #6)
+
+class TestFindingsToInlineFalsyPath:
+    """An inline comment with a falsy path makes GitHub 422 the WHOLE batch — drop it instead."""
+
+    def test_falsy_path_dropped(self):
+        assert findings_to_inline_comments([_F(path="")]) == []
+        assert findings_to_inline_comments([_F(path=None)]) == []
+
+    def test_normal_finding_still_emitted(self):
+        assert len(findings_to_inline_comments([_F()])) == 1   # regression guard
+
+
+class TestNoneSafeRendering:
+    """A None/scalar field from the ledger or a null-filled LLM result must never crash the summary."""
+
+    def test_none_body_and_path_do_not_crash(self):
+        ledger = {"s1": {"path": None, "line": None, "body": None, "category": "bug",
+                         "severity": "high", "status": "open"}}
+        md = build_summary_md({"verdict": "minor_comments", "summary": "a single string summary"},
+                              ledger, [], "abc1234")
+        assert isinstance(md, str)
+        assert "None" not in md                              # no literal "None" leaked
+        assert "a single string summary" in md               # string summary -> one bullet, not per-char
+
+    def test_summary_list_with_none_and_scalar(self):
+        md = build_summary_md({"summary": ["ok", None, 5]}, {}, [], "abc1234")
+        assert "- ok" in md
+        assert "- 5" in md                                   # scalar coerced to str
+        assert "None" not in md
+
+
+class TestInline422Fallback:
+    """A single bad line-anchor must not lose the whole inline review — fall back per-comment."""
+
+    @patch('post_comment.requests.post')
+    def test_falls_back_to_per_comment(self, mock_post):
+        def router(url, *a, **k):
+            return _resp(422) if url.endswith("/reviews") else _resp(201, {"id": 1})
+        mock_post.side_effect = router
+        c1 = {"path": "a.py", "line": 5, "side": "RIGHT", "body": "x"}
+        c2 = {"path": "b.py", "line": 9, "side": "RIGHT", "body": "y"}
+        out = create_pr_review("o/r", 1, "sha", "", [c1, c2], "tok")
+        assert out is not None                               # at least one comment posted
+        assert mock_post.call_count == 3                     # 1 batch + 2 per-comment
+
+    @patch('post_comment.requests.post')
+    def test_skips_only_the_bad_comment(self, mock_post):
+        seq = {"n": 0}
+        def router(url, *a, **k):
+            if url.endswith("/reviews"):
+                return _resp(422)
+            seq["n"] += 1
+            return _resp(201, {"id": 1}) if seq["n"] == 1 else _resp(422)
+        mock_post.side_effect = router
+        c1 = {"path": "a.py", "line": 5, "side": "RIGHT", "body": "x"}
+        c2 = {"path": "b.py", "line": 9, "side": "RIGHT", "body": "y"}
+        out = create_pr_review("o/r", 1, "sha", "", [c1, c2], "tok")
+        assert out is not None                               # one still posted, the bad one skipped
+        assert mock_post.call_count == 3
+
+    @patch('post_comment.requests.post')
+    def test_non_422_failure_still_returns_none(self, mock_post):
+        mock_post.return_value = _resp(500)
+        out = create_pr_review("o/r", 1, "sha", "", [{"path": "a.py", "line": 5, "body": "x"}], "tok")
+        assert out is None
+        assert mock_post.call_count == 1                     # no per-comment fallback on non-422
+
+
+class TestDriverRobustness:
+    """One bad PR must not sink the rest, and the run-lock must be released even on a crash."""
+
+    def _wa(self, prs, preview=False, raise_on=None):
+        store = {}
+        data = {"pull_requests": prs, "github_access_token": "tok", "reviewed_prs": {},
+                "run_lock_token": "T1", "run_lock": {"token": "T1"}}
+        wa = Mock()
+        wa.fetch_data.side_effect = lambda key=None, default=None, run_based=False, **k: data.get(key, default)
+        wa.is_test_run.return_value = preview
+
+        def store_data(*a, **k):
+            key = a[0] if a else k.get("key")
+            val = a[1] if len(a) > 1 else k.get("data")
+            store[key] = val
+            if raise_on and key == raise_on:
+                raise RuntimeError(f"store boom on {key}")
+            return True
+        wa.store_data.side_effect = store_data
+        return wa, store
+
+    def test_post_loop_isolates_bad_pr(self):
+        prs = [{"id": "o/bad", "pr_number": 1, "comment_generated": True, "review_dict": {"findings": []}},
+               {"id": "o/good", "pr_number": 2, "comment_generated": True, "review_dict": {"findings": []}}]
+        wa, store = self._wa(prs, preview=False)
+
+        def fake_process(pr, *a, **k):
+            if pr["id"] == "o/bad":
+                raise RuntimeError("boom in one PR")
+            pr["comment_posted"] = True
+            return True, "http://good", "<block>"
+
+        with patch.object(post_comment, "waveassist", wa), \
+             patch.object(post_comment, "process_one_pr", side_effect=fake_process):
+            run_driver()
+
+        assert prs[1].get("comment_posted") is True          # good PR processed despite the bad one
+        assert store.get("run_lock") == {}                   # lock released in finally
+
+    def test_lock_released_even_when_cleanup_raises(self):
+        prs = [{"id": "o/x", "pr_number": 1, "comment_generated": True, "review_dict": {"findings": []}}]
+        wa, store = self._wa(prs, preview=False, raise_on="display_output")
+
+        def fake_process(pr, *a, **k):
+            pr["comment_posted"] = True
+            return True, "http://x", "<b>"
+
+        with patch.object(post_comment, "waveassist", wa), \
+             patch.object(post_comment, "process_one_pr", side_effect=fake_process), \
+             pytest.raises(RuntimeError):
+            run_driver()                                     # cleanup store raises...
+
+        assert store.get("run_lock") == {}                   # ...but the lock was still released
+
+
+class TestProcessOnePrPartialPost:
+    """Review P2: if inline comments posted but the summary failed, record the ledger anyway so the
+    already-posted inline comments are NOT re-posted as 'new' on the next run (no duplicates)."""
+
+    def test_inline_posted_summary_failed_still_records_ledger(self):
+        pr = {"id": "o/r", "pr_number": 1, "comment_generated": True, "current_sha": "sha",
+              "review_dict": {"verdict": "needs_changes", "findings": [_F()]}}
+        reviewed = {}
+        with patch.object(post_comment, "find_summary_comment_id", return_value=None), \
+             patch.object(post_comment, "create_pr_review", return_value={"id": 99}), \
+             patch.object(post_comment, "create_summary_comment", return_value=None):  # summary FAILS
+            changed, url, block = process_one_pr(pr, reviewed, "tok", preview=False)
+        assert changed is True                          # ledger recorded despite the summary failure
+        assert reviewed.get("o/r#1", {}).get("findings")  # findings persisted -> no re-post next run
+        assert pr.get("comment_posted") is not True     # not fully done; summary retried next cycle

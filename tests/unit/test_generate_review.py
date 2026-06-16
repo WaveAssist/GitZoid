@@ -20,6 +20,7 @@ from generate_review import (
     finding_sig,
     apply_gate,
     security_sweep,
+    verify_posted_findings,
     _format_brain_profile,
     brain_auth_files,
     brain_secret_locations,
@@ -277,3 +278,34 @@ class TestBrainAdapters:
         assert "repo_profile" in h
         assert _format_brain_profile({}) == ""
         assert _format_brain_profile(None) == ""
+
+
+class TestVerifyFailOpen:
+    """Verification must DROP a finding only on an EXPLICIT refutation (is_real is False). A None or
+    missing is_real (e.g. a null-filled LLM result) must fail OPEN and keep the finding."""
+
+    def _call(self, verdict_dict):
+        pr = {"id": "o/r", "current_sha": "sha",
+              "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n+x = 1"}]}
+        diff_lines = build_diff_lines(pr["files"])
+        findings = [{"path": "a.py", "line": 1, "side": "RIGHT", "category": "bug",
+                     "severity": "high", "body": "off-by-one", "confidence": "high"}]
+        vmock = Mock()
+        vmock.model_dump.return_value = verdict_dict
+        with patch("generate_review.fetch_file_text", return_value="x = 1\n"), \
+             patch("generate_review.waveassist") as wa:
+            wa.call_llm.return_value = vmock
+            return verify_posted_findings(findings, pr, "tok", "model", diff_lines, "high")
+
+    def test_keeps_when_is_real_none(self):
+        _, _, dropped = self._call({"is_real": None, "true_severity": "high", "reason": ""})
+        assert dropped == []                       # not actively refuted -> kept (fail open)
+
+    def test_keeps_when_is_real_missing_key(self):
+        _, _, dropped = self._call({"true_severity": "high", "reason": ""})
+        assert dropped == []
+
+    def test_drops_on_explicit_false(self):
+        _, _, dropped = self._call({"is_real": False, "true_severity": "low", "reason": "guarded above"})
+        assert len(dropped) == 1
+        assert dropped[0]["_drop_reason"] == "guarded above"

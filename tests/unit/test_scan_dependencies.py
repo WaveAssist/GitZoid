@@ -28,7 +28,10 @@ from scan_dependencies import (
     passes_feed_gate,
     content_hash,
     changed_dependencies,
+    query_osv,
+    fetch_kev_set_with_status,
 )
+import scan_dependencies as sd
 
 
 class TestRequirementsTxt:
@@ -268,3 +271,54 @@ class TestSnapshotDiff:
         assert ("a", "1.1") in changed
         assert ("c", "2.0") in changed
         assert ("b", "1.0") not in changed
+
+
+class _R:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+    def json(self):
+        return self._payload
+
+
+class TestQueryOsvStatus:
+    """query_osv must report whether the OSV call SUCCEEDED so the driver can tell a clean scan from
+    a feed hiccup (issue #1: never resolve a finding just because a hiccup made it absent)."""
+
+    def test_empty_queries_ok_true(self):
+        hits, ok = query_osv([])
+        assert hits == {} and ok is True            # nothing to query is a clean scan
+
+    def test_http_error_ok_false(self, monkeypatch):
+        monkeypatch.setattr(sd.requests, "post", lambda *a, **k: _R(500))
+        hits, ok = query_osv([{"name": "x", "version": "1", "ecosystem": "PyPI"}])
+        assert hits == {} and ok is False
+
+    def test_exception_ok_false(self, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+        monkeypatch.setattr(sd.requests, "post", boom)
+        hits, ok = query_osv([{"name": "x", "version": "1", "ecosystem": "PyPI"}])
+        assert hits == {} and ok is False
+
+    def test_success_returns_hits_and_ok_true(self, monkeypatch):
+        monkeypatch.setattr(sd.requests, "post",
+                            lambda *a, **k: _R(200, {"results": [{"vulns": [{"id": "OSV-1"}]}]}))
+        hits, ok = query_osv([{"name": "requests", "version": "2.31.0", "ecosystem": "PyPI"}])
+        assert ok is True
+        assert hits == {("requests", "2.31.0"): ["OSV-1"]}
+
+
+class TestKevStatus:
+    def test_ok_true_on_200(self, monkeypatch):
+        monkeypatch.setattr(sd.requests, "get",
+                            lambda *a, **k: _R(200, {"vulnerabilities": [{"cveID": "CVE-1"}]}))
+        s, ok = fetch_kev_set_with_status()
+        assert ok is True and "CVE-1" in s
+
+    def test_ok_false_on_failure(self, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("net")
+        monkeypatch.setattr(sd.requests, "get", boom)
+        s, ok = fetch_kev_set_with_status()
+        assert ok is False and s == set()

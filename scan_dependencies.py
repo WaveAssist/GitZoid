@@ -444,25 +444,27 @@ def collect_repo_dependencies(repo_path, branch, headers):
 
 
 def query_osv(deps):
-    """OSV querybatch → {(name,version): [vuln_id,...]} then hydrate each id to a full record."""
+    """OSV querybatch → ({(name,version): [vuln_id,...]}, ok). `ok` is False ONLY when the OSV call
+    itself failed (HTTP error / exception), so the driver can tell a clean scan ({} , True) from a
+    feed hiccup ({}, False) and never resolve a finding just because a hiccup made it absent."""
     batch = build_osv_batch(deps)
     if not batch["queries"]:
-        return {}
+        return {}, True            # nothing to query is a successful (clean) scan
     try:
         r = requests.post(OSV_BATCH_URL, json=batch, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
             print(f"⚠️ OSV batch HTTP {r.status_code}")
-            return {}
+            return {}, False
         results = r.json().get("results", [])
     except Exception as e:
         print(f"⚠️ OSV batch failed: {e}")
-        return {}
+        return {}, False
     out = {}
     for dep, res in zip(deps, results):
         ids = [v.get("id") for v in (res.get("vulns") or []) if v.get("id")]
         if ids:
             out[(dep["name"], dep["version"])] = ids
-    return out
+    return out, True
 
 
 def hydrate_vuln(vuln_id):
@@ -487,6 +489,28 @@ def fetch_kev_set():
     return set()      # soft-fail: no KEV data just means no auto-escalation this run
 
 
+def fetch_kev_set_with_status():
+    """Like fetch_kev_set but also reports whether the feed call succeeded. When KEV fails we can't
+    trust actively_exploited=False, so the driver treats the whole run as degraded (no repo is marked
+    scanned-ok) and carries findings forward instead of resolving them."""
+    try:
+        r = requests.get(KEV_URL, timeout=HTTP_TIMEOUT)
+        if r.status_code == 200:
+            return parse_kev_feed(r.json()), True
+        print(f"⚠️ KEV HTTP {r.status_code}")
+    except Exception as e:
+        print(f"⚠️ KEV fetch failed: {e}")
+    return set(), False
+
+
+def _dep_sig(repo, name, vuln_id):
+    """Dependency finding identity — MUST match triage_and_alert.finding_sig for a dependency
+    (no dedup_key): category|repo|name|vuln_id. Used to look a finding up in the persistent ledger so
+    its realism verdict is reused instead of re-judged by a non-deterministic LLM every run."""
+    raw = f"dependency|{repo}|{name}|{vuln_id}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 skip = waveassist.fetch_data("security_skip_run", run_based=True, default="0") == "1"
@@ -499,8 +523,10 @@ if repositories:
     access_token = waveassist.fetch_data("github_access_token", default="") or ""
     model_name = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL
     headers = _gh_headers(access_token)
-    kev_set = fetch_kev_set()
+    kev_set, kev_ok = fetch_kev_set_with_status()
+    prior_ledger = waveassist.fetch_data("security_findings", default={}) or {}
     candidates = []
+    scanned_ok = set()
 
     for repo in repositories:
         repo_path = repo.get("id") if isinstance(repo, dict) else repo
@@ -522,7 +548,7 @@ if repositories:
                 print(f"✓ {repo_path}: lockfiles unchanged since a clean scan; skip")
                 continue
 
-            osv_hits = query_osv(deps)
+            osv_hits, osv_ok = query_osv(deps)
             repo_findings = []
             for (name, version), vuln_ids in osv_hits.items():
                 reach = dep_reachability(name, profile)
@@ -543,6 +569,15 @@ if repositories:
                     }
                     if not passes_feed_gate(finding):
                         continue
+                    # Realism is decided ONCE. If we already judged this finding real (it is open in
+                    # the ledger), reuse that verdict and impact instead of re-running a
+                    # non-deterministic LLM every day — a daily flip is what made the same dependency
+                    # silently resolve then re-alert (issue #1).
+                    cached = prior_ledger.get(_dep_sig(repo_path, name, parsed["id"]))
+                    if isinstance(cached, dict) and cached.get("status") == "open":
+                        finding["impact"] = cached.get("impact") or ""
+                        repo_findings.append(finding)
+                        continue
                     is_real, impact = assess_finding(model_name, finding, profile)
                     if not is_real:
                         print(f"· dropped {name} {parsed['id']} (model: not a realistic risk)")
@@ -551,8 +586,14 @@ if repositories:
                     repo_findings.append(finding)
 
             candidates.extend(repo_findings)
+            # Mark the repo scanned-ok only when BOTH feeds were healthy this run; a hiccup must never
+            # look like "the issue is gone", so on a degraded run the repo stays out of scanned_ok and
+            # triage carries its findings forward instead of resolving them.
+            if osv_ok and kev_ok:
+                scanned_ok.add(repo_path)
             waveassist.store_data(f"dependency_snapshot:{repo_path}",
-                                  {"hash": blob_hash, "scanned_clean": len(repo_findings) == 0,
+                                  {"hash": blob_hash,
+                                   "scanned_clean": osv_ok and kev_ok and len(repo_findings) == 0,
                                    "deps": deps},
                                   data_type="json")
             print(f"✓ {repo_path}: scanned {len(deps)} deps, {len(repo_findings)} real finding(s)")
@@ -563,5 +604,12 @@ if repositories:
     # Hand candidates to triage (run-based; deep_security_audit appends to the same key next).
     existing = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []
     waveassist.store_data("security_candidates", existing + candidates,
+                          run_based=True, data_type="json")
+    # Publish the repos whose DEPENDENCIES were scanned successfully this run. triage uses this to
+    # resolve only dependency findings (code findings resolve against security_scanned_ok_code, which
+    # the weekly deep audit writes) — so a daily dep scan never silently resolves an un-audited auth
+    # hole. Merge in case of re-entry.
+    prior_ok = set(waveassist.fetch_data("security_scanned_ok_deps", run_based=True, default=[]) or [])
+    waveassist.store_data("security_scanned_ok_deps", sorted(prior_ok | scanned_ok),
                           run_based=True, data_type="json")
     print(f"GitZoid Security: scan_dependencies produced {len(candidates)} candidate(s).")

@@ -616,8 +616,8 @@ def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity
             v = None
         if not v:
             survivors.append(f); continue                       # unavailable/error → fail open
-        if not v.get("is_real"):
-            dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue
+        if v.get("is_real") is False:                           # drop ONLY on explicit refutation;
+            dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue  # None/missing → keep (fail open)
         # Verified real → trust the re-judged severity, and treat confidence as high.
         survivors.append({**f, "severity": v.get("true_severity") or f.get("severity"), "confidence": "high"})
     kept, verdict, _ = apply_gate(survivors, diff_lines, seen_sigs=set(), severity_threshold=severity_threshold)

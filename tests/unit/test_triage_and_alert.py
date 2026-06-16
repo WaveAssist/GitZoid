@@ -15,10 +15,13 @@ from triage_and_alert import (
     should_escalate,
     reconcile_ledger,
     rank_findings,
+    split_findings,
+    cap_code_findings,
     lock_is_active,
     build_alert_email,
     build_subject,
     parse_recipients,
+    MAX_CODE_ALERTS,
 )
 
 
@@ -49,7 +52,10 @@ class TestCleanOutput:
         ]
 
     def test_email_has_no_emoji_or_emdash(self):
-        out = build_alert_email(self._findings(), scanned_repos=1)
+        fs = self._findings()
+        code = [f for f in fs if f["category"] in ("authz", "secret", "backdoor")]
+        deps = [f for f in fs if f["category"] == "dependency"]
+        out = build_alert_email(code, deps, scanned_repos=1)
         for ch in EMOJI:
             assert ch not in out, f"email should not contain {ch!r}"
 
@@ -60,7 +66,10 @@ class TestCleanOutput:
         assert "GitZoid Security" in subj
 
     def test_email_still_shows_fix_and_severity(self):
-        out = build_alert_email(self._findings(), scanned_repos=1)
+        fs = self._findings()
+        code = [f for f in fs if f["category"] in ("authz", "secret", "backdoor")]
+        deps = [f for f in fs if f["category"] == "dependency"]
+        out = build_alert_email(code, deps, scanned_repos=1)
         assert "Fix:" in out
         assert "Severity: High" in out
 
@@ -159,15 +168,16 @@ class TestReconcile:
         assert ledger[finding_sig(_dep())]["severity"] == "critical"
 
     def test_disappeared_finding_marked_resolved(self):
+        # Resolution now requires the repo to have been SCANNED OK this run (absence alone is not a fix).
         first, _, _ = reconcile_ledger({}, [_dep()])
-        ledger, to_alert, resolved = reconcile_ledger(first, [])   # gone this run
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps={"o/r"})   # gone, repo scanned
         assert len(resolved) == 1
         assert to_alert == []                              # resolutions are NOT emailed
         assert ledger[finding_sig(_dep())]["status"] == "resolved"
 
     def test_resolved_then_reappears_is_open_again(self):
         first, _, _ = reconcile_ledger({}, [_dep()])
-        gone, _, _ = reconcile_ledger(first, [])
+        gone, _, _ = reconcile_ledger(first, [], scanned_ok_deps={"o/r"})
         back, to_alert, resolved = reconcile_ledger(gone, [_dep()])
         assert back[finding_sig(_dep())]["status"] == "open"
         assert len(to_alert) == 1                          # came back → alert again
@@ -238,3 +248,225 @@ class TestDriver:
             "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
         assert sent == []                                # silence is the all-clear
         assert "display_output" in stored               # but the run still reports it scanned
+
+
+class TestReconcileScannedOk:
+    """Issue #1 (repeated emails): only RESOLVE a finding when its repo was actually scanned OK this
+    run. Absence from a feed/GitHub/LLM hiccup must carry the finding forward, not resolve+re-alert."""
+
+    def test_no_resolve_on_unscanned_repo(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps=set())   # feed hiccup
+        assert resolved == []
+        assert ledger[finding_sig(_dep())]["status"] == "open"
+
+    def test_resolve_only_when_repo_scanned(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps={"o/r"})
+        assert len(resolved) == 1
+        assert ledger[finding_sig(_dep())]["status"] == "resolved"
+
+    def test_unscanned_other_repo_does_not_resolve_target(self):
+        first, _, _ = reconcile_ledger({}, [_dep(repo="o/a")])
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps={"o/b"})
+        assert resolved == []
+        assert ledger[finding_sig(_dep(repo="o/a"))]["status"] == "open"
+
+    def test_no_realert_after_feed_hiccup(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        # feed failed: finding absent, repo NOT scanned ok -> carried forward, not resolved
+        hiccup, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps=set())
+        assert to_alert == [] and resolved == []
+        # next run recovers, same finding present -> it was never resolved, so NO re-alert
+        back, to_alert2, _ = reconcile_ledger(hiccup, [_dep()], scanned_ok_deps={"o/r"})
+        assert to_alert2 == []
+
+
+class TestSeverityAndFixFlap:
+    """Flapping feed severity / fix-availability must re-alert at most ONCE, not every cycle."""
+
+    def test_no_realert_on_severity_flap(self):
+        l1, _, _ = reconcile_ledger({}, [_dep(severity="high", fixed=None)])
+        l2, a2, _ = reconcile_ledger(l1, [_dep(severity="critical", fixed=None)], scanned_ok_deps={"o/r"})
+        assert len(a2) == 1
+        assert l2[finding_sig(_dep())]["max_alerted_severity"] == "critical"
+        l3, a3, _ = reconcile_ledger(l2, [_dep(severity="high", fixed=None)], scanned_ok_deps={"o/r"})
+        assert a3 == []                                    # high < critical hwm -> no re-alert
+        l4, a4, _ = reconcile_ledger(l3, [_dep(severity="critical", fixed=None)], scanned_ok_deps={"o/r"})
+        assert a4 == []                                    # back to critical, still at hwm -> no re-alert
+
+    def test_no_realert_on_fix_flap(self):
+        l1, _, _ = reconcile_ledger({}, [_dep(fixed=None)])
+        l2, a2, _ = reconcile_ledger(l1, [_dep(fixed="1.0.1")], scanned_ok_deps={"o/r"})
+        assert len(a2) == 1
+        assert l2[finding_sig(_dep())]["fix_alerted"] is True
+        l3, a3, _ = reconcile_ledger(l2, [_dep(fixed=None)], scanned_ok_deps={"o/r"})
+        assert a3 == []                                    # fix field cleared -> no re-alert
+        l4, a4, _ = reconcile_ledger(l3, [_dep(fixed="1.0.1")], scanned_ok_deps={"o/r"})
+        assert a4 == []                                    # fix reappears -> already alerted, no re-alert
+
+    def test_max_alerted_severity_and_fix_alerted_seeded(self):
+        ledger, _, _ = reconcile_ledger({}, [_dep(severity="high", fixed="1.0.1")])
+        e = ledger[finding_sig(_dep())]
+        assert e["max_alerted_severity"] == "high"
+        assert e["fix_alerted"] is True
+        ledger2, _, _ = reconcile_ledger({}, [_dep(fixed=None)])
+        assert ledger2[finding_sig(_dep())]["fix_alerted"] is False
+
+
+class TestSeparation:
+    """Issue #4: code/access issues and dependencies render in their own labelled sections, and
+    dependencies are NEVER capped (issue #1: report them all at once)."""
+
+    def _code(self):
+        return {"category": "authz", "repo": "o/r", "title": "Bypassable check: /acl/list",
+                "severity": "high", "named_victim": "any user", "fix": "add authorize_admin",
+                "impact": "reads any user's data", "entry_point": "/acl/list"}
+
+    def _dep_f(self, name="litellm"):
+        return {"category": "dependency", "repo": "o/r", "name": name, "version": "1.0",
+                "vuln_id": "CVE-1", "severity": "high", "fix": "1.1", "impact": "leaks keys"}
+
+    def test_email_has_two_labelled_sections_code_first(self):
+        out = build_alert_email([self._code()], [self._dep_f()], scanned_repos=2)
+        assert "Code and access issues" in out
+        assert "Vulnerable dependencies" in out
+        assert out.index("Code and access issues") < out.index("Vulnerable dependencies")
+        for ch in EMOJI:
+            assert ch not in out
+
+    def test_code_section_omitted_when_empty(self):
+        out = build_alert_email([], [self._dep_f()], scanned_repos=1)
+        assert "Code and access issues" not in out
+        assert "Vulnerable dependencies" in out
+
+    def test_all_dep_findings_sent_not_capped(self):
+        deps = [self._dep_f(name=f"pkg{i}") for i in range(20)]
+        out = build_alert_email([], deps, scanned_repos=1)
+        assert all(f"pkg{i}" in out for i in range(20))     # no dependency cap
+
+    def test_code_cap_applied_but_kev_kept(self):
+        code = []
+        for i in range(8):
+            f = self._code()
+            f = {**f, "entry_point": f"/r{i}", "title": f"issue {i}", "severity": "low",
+                 "actively_exploited": (i == 7)}      # the LAST one is KEV and lowest priority
+            code.append(f)
+        kept = cap_code_findings(code)
+        assert any(f.get("actively_exploited") for f in kept)   # KEV one survives the cap
+        non_kev = [f for f in kept if not f.get("actively_exploited")]
+        assert len(non_kev) <= MAX_CODE_ALERTS
+
+
+class TestScannedOkCategoryScoped:
+    """REGRESSION (review P0): a daily dependency-only scan must NOT resolve an un-re-audited CODE
+    finding (authz/secret/backdoor). Code findings resolve only against scanned_ok_code (weekly
+    audit); dependency findings only against scanned_ok_deps."""
+
+    def _authz(self, repo="o/r"):
+        return {"category": "authz", "repo": repo, "dedup_key": "authz:/acl/list",
+                "title": "Bypassable check: /acl/list", "severity": "high",
+                "impact": "reads any user's data"}
+
+    def test_dep_scan_does_not_resolve_code_finding(self):
+        first, _, _ = reconcile_ledger({}, [self._authz()])
+        # daily dep scan ran clean for o/r, but the code was NOT audited this run
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_deps={"o/r"},
+                                                      scanned_ok_code=set())
+        assert resolved == []
+        assert ledger[finding_sig(self._authz())]["status"] == "open"
+
+    def test_code_scan_resolves_code_finding(self):
+        first, _, _ = reconcile_ledger({}, [self._authz()])
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_code={"o/r"})
+        assert len(resolved) == 1
+        assert ledger[finding_sig(self._authz())]["status"] == "resolved"
+
+    def test_code_scan_does_not_resolve_dependency_finding(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        # weekly audit ran (code), but deps were not scanned this run
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_code={"o/r"},
+                                                      scanned_ok_deps=set())
+        assert resolved == []
+        assert ledger[finding_sig(_dep())]["status"] == "open"
+
+
+class TestDependencyGrouping:
+    """Real-world fix: many CVEs for the SAME package must consolidate into ONE block with ONE
+    upgrade target, not a dozen near-identical entries with conflicting 'upgrade to X' advice."""
+
+    def _cve(self, vuln_id, severity, fix, impact="some impact"):
+        return {"category": "dependency", "repo": "o/r", "name": "Django", "version": "4.2",
+                "vuln_id": vuln_id, "severity": severity, "fix": fix, "impact": impact}
+
+    def test_same_package_consolidated_into_one_block(self):
+        deps = [
+            self._cve("GHSA-1", "critical", "5.2.8", "sql injection"),
+            self._cve("GHSA-2", "high", "4.2.24", "denial of service"),
+            self._cve("GHSA-3", "high", "6.0.4", "path traversal"),
+        ]
+        out = build_alert_email([], deps, scanned_repos=1)
+        assert out.count("Django 4.2") == 1                      # one block, not three
+        assert "3 known vulnerabilities" in out                  # the count
+        assert "upgrade Django to 6.0.4 or later" in out         # single target = highest fixed version
+        assert "Severity: Critical" in out                       # worst severity surfaced
+        for ref in ("GHSA-1", "GHSA-2", "GHSA-3"):
+            assert ref in out                                    # every advisory still referenced
+
+    def test_distinct_packages_stay_separate(self):
+        deps = [self._cve("GHSA-1", "high", "5.2.8"),
+                {"category": "dependency", "repo": "o/r", "name": "authlib", "version": "1.6.4",
+                 "vuln_id": "GHSA-9", "severity": "high", "fix": "1.6.5", "impact": "dos"}]
+        out = build_alert_email([], deps, scanned_repos=1)
+        assert "Django 4.2" in out and "authlib 1.6.4" in out
+
+    def test_no_fixed_version_group(self):
+        deps = [self._cve("GHSA-1", "high", None), self._cve("GHSA-2", "high", None)]
+        out = build_alert_email([], deps, scanned_repos=1)
+        assert "No fixed version" in out
+
+
+class TestIssueCountGrouped:
+    """The header/subject 'N issues' must count GROUPED issues (a package = 1), not raw CVEs —
+    so 12 Django advisories shown as one block count as one issue, not twelve."""
+
+    def _cve(self, vid, sev, fix):
+        return {"category": "dependency", "repo": "o/r", "name": "Django", "version": "4.2",
+                "vuln_id": vid, "severity": sev, "fix": fix, "impact": "x"}
+
+    def test_header_and_subject_count_packages_not_cves(self):
+        code = [{"category": "authz", "repo": "o/r", "title": "A", "severity": "high", "impact": "x"},
+                {"category": "secret", "repo": "o/r", "title": "B", "severity": "high", "impact": "x"}]
+        deps = [self._cve("GHSA-1", "critical", "5.2.8"),
+                self._cve("GHSA-2", "high", "4.2.24"),
+                self._cve("GHSA-3", "high", "6.0.4")]      # 3 Django CVEs = ONE package
+        out = build_alert_email(code, deps, scanned_repos=2)
+        assert "3 issues found" in out                     # 2 code + 1 Django package
+        assert "5 issues" not in out                       # not the raw 2+3
+        subj = build_subject(code + deps)
+        assert "3 issues" in subj
+
+    def test_single_issue_singular_wording(self):
+        out = build_alert_email([], [self._cve("GHSA-1", "high", "5.0.7")], scanned_repos=1)
+        assert "1 issue found" in out and "1 issues" not in out
+
+
+class TestSubjectMultiRepo:
+    """Fix D: when findings span multiple repos the subject must not name just one repo."""
+
+    def _f(self, repo, sev="high", **kw):
+        return {"category": "authz", "repo": repo, "title": f"bug in {repo}",
+                "severity": sev, "impact": "x", **kw}
+
+    def test_single_repo_names_the_repo(self):
+        s = build_subject([self._f("o/r")])
+        assert "in o/r" in s
+
+    def test_multi_repo_says_count_of_repos(self):
+        s = build_subject([self._f("o/a"), self._f("o/b")])
+        assert "2 repositories" in s
+        assert "GitZoid Security" in s
+
+    def test_kev_multi_repo_mentions_more(self):
+        s = build_subject([self._f("o/a", actively_exploited=True), self._f("o/b")])
+        assert "actively exploited" in s and "more" in s
