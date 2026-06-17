@@ -77,6 +77,52 @@ nodes:
     run_after:
       - deep_security_audit
 
+  # ---- Knowledge Digest chain (Phase C) ----
+  # A THIRD disconnected subgraph on its own WEEKLY clock (Mon 08:30 UTC, the GitDigest house default), so
+  # the multi-repo activity analysis never holds the 2-min review lock or the daily security lock. One
+  # starting node per connected subgraph — review, security, and digest are three independent chains, which
+  # the platform supports. digest_check_and_init gates (credits + enable_digest + lock) and resolves the
+  # per-group working set; send_digest releases digest_run_lock. The brain (profile:{repo}) is read ONLY if
+  # present — never a hard dependency: a run_after linking these nodes to study_repos would merge the digest
+  # and review subgraphs into one connected graph with two starting nodes and fail deploy validation.
+  - key: digest_check_and_init
+    name: DigestCheckAndInit
+    file_name: digest_check_and_init.py
+    starting_node: true
+    schedule:
+      cron: "30 8 * * 1"   # weekly, Monday 08:30 UTC
+      timezone: "UTC"
+
+  - key: fetch_activity
+    name: FetchActivity
+    file_name: fetch_activity.py
+    run_after:
+      - digest_check_and_init
+
+  - key: analyze_activity
+    name: AnalyzeActivity
+    file_name: analyze_activity.py
+    run_after:
+      - fetch_activity
+
+  - key: generate_business_report
+    name: GenerateBusinessReport
+    file_name: generate_business_report.py
+    run_after:
+      - analyze_activity
+
+  - key: generate_technical_report
+    name: GenerateTechnicalReport
+    file_name: generate_technical_report.py
+    run_after:
+      - generate_business_report
+
+  - key: send_digest
+    name: SendDigest
+    file_name: send_digest.py
+    run_after:
+      - generate_technical_report
+
 variables:
   - type: github
     name: github
@@ -165,6 +211,36 @@ variables:
     is_optional: true
     default_value: ""
     helper_message: "Additional emails to CC on security alerts, comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them."
+
+  # Knowledge Digest toggle. Config default is "true" so a NEW user's setup wizard stores "true" and the
+  # digest is ON for them. EXISTING users never stored this key, so the node treats unset as OFF (no surprise
+  # weekly emails) — the OPPOSITE of enable_security, because the digest is a recurring email, not a silent
+  # watch. Existing users turn it on in one click. See digest_check_and_init.digest_enabled().
+  - name: enable_digest
+    key: enable_digest
+    display_name: Knowledge Digest
+    type: select
+    is_optional: true
+    default_value: "true"
+    helper_message: "Weekly leadership-ready digest of what actually shipped, read from your code diffs and grouped by project, with a security roll-up. One email a week, even in a quiet week."
+    options:
+      - name: "On"
+        key: "true"
+      - name: "Off"
+        key: "false"
+
+  # Project groups for the digest. Each group is {name, repos[], recipients[]} and gets its own weekly email
+  # (owner always primary, recipients CC'd). Repos belong to at most one group (exclusive membership, enforced
+  # in the dashboard input). Empty/unset → the node falls back to ONE implicit group over all selected repos,
+  # so the digest ships with zero dashboard dependency. Stored as a JSON string (data_type "list").
+  - name: digest_groups
+    key: digest_groups
+    display_name: "Knowledge Digest"
+    type: repo_groups
+    is_optional: true
+    depends_on: github
+    default_value: "[]"
+    helper_message: "Group your selected repos by project; each group gets its own weekly digest with its own recipients. Leave empty for a single digest covering all selected repos."
 
   - name: schedule
     key: schedule

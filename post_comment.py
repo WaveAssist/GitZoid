@@ -71,13 +71,36 @@ def _verdict_line(verdict, n_find, n_opt, n_sugg):
 
 # ---------------------------------------------------------------- GitHub REST
 
+def create_single_review_comment(repo_path, pr_number, commit_id, comment, token):
+    """POST ONE inline review comment. Returns the json on success, None on failure. Used as the
+    per-comment fallback when the atomic batch review is rejected for one bad anchor."""
+    url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}/comments"
+    payload = {"commit_id": commit_id, "path": comment.get("path"), "line": comment.get("line"),
+               "side": comment.get("side", "RIGHT"), "body": comment.get("body", "")}
+    resp = requests.post(url, headers=_gh_headers(token), json=payload, timeout=30)
+    if resp.status_code in (200, 201):
+        return resp.json()
+    print(f"❌ single comment failed HTTP {resp.status_code} "
+          f"({comment.get('path')}:{comment.get('line')}): {resp.text[:200]}")
+    return None
+
+
 def create_pr_review(repo_path, pr_number, commit_id, summary_body, inline_comments, token):
-    """POST one COMMENT review with inline comments. commit_id anchors the lines."""
+    """POST one COMMENT review with inline comments. commit_id anchors the lines. On a 422 (GitHub
+    rejects the WHOLE batch when any single line-anchor is stale), fall back to posting each comment
+    on its own so one bad anchor only loses itself, not every inline comment."""
     url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}/reviews"
     payload = {"commit_id": commit_id, "event": "COMMENT", "body": summary_body or "", "comments": inline_comments}
     resp = requests.post(url, headers=_gh_headers(token), json=payload, timeout=30)
     if resp.status_code in (200, 201):
         return resp.json()
+    if resp.status_code == 422 and inline_comments:
+        print("⚠️ atomic review rejected HTTP 422; falling back to per-comment posting.")
+        posted = sum(1 for c in inline_comments
+                     if create_single_review_comment(repo_path, pr_number, commit_id, c, token))
+        if posted:
+            return {"id": None, "_fallback": True, "_posted": posted}
+        return None
     print(f"❌ create review failed HTTP {resp.status_code}: {resp.text[:300]}")
     return None
 
@@ -119,7 +142,9 @@ def findings_to_inline_comments(findings):
     for f in (findings or []):
         if f.get("line") is None:            # unanchored → summary-only, never an inline comment
             continue
-        body = _finding_header(f) + "\n\n" + f.get("body", "")
+        if not f.get("path"):                # no file → cannot anchor; a falsy path 422s the whole batch
+            continue
+        body = _finding_header(f) + "\n\n" + (f.get("body") or "")
         if f.get("suggested_replacement"):
             body += f"\n\n```suggestion\n{f['suggested_replacement']}\n```"
         out.append({"path": f.get("path"), "line": f.get("line"), "side": f.get("side", "RIGHT"), "body": body})
@@ -131,12 +156,14 @@ def findings_to_inline_comments(findings):
 def _finding_row(v, resolved=False):
     """One clean line: no per-line emoji. Section header carries the icon; severity stays as
     text on open issues for quick triage. Resolved rows drop severity entirely."""
-    loc = f"`{v.get('path')}:{v.get('line')}`" if v.get("line") is not None else f"`{v.get('path')}`"
+    path = v.get("path") or ""
+    body = v.get("body") or ""
+    loc = f"`{path}:{v.get('line')}`" if v.get("line") is not None else f"`{path}`"
     if resolved:
-        return f"- {loc} — {v.get('body')}"
+        return f"- {loc} — {body}"
     sev = v.get("severity")
     sev_md = f"_{sev}_ " if sev in ("high", "medium", "low") else ""
-    return f"- {sev_md}{loc} — {v.get('body')}"
+    return f"- {sev_md}{loc} — {body}"
 
 
 def build_summary_md(review, findings_ledger, changed_files, sha_short, current_sha=None, is_update=False):
@@ -151,6 +178,11 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short, current_
     free_opts = review.get("potential_optimizations") or []
     free_sugg = review.get("suggestions") or []
     summary_pts = review.get("summary") or review.get("changes_summary") or []
+    # A null-filled LLM result or a legacy ledger can hand back a string/None/scalar instead of a
+    # list of strings; coerce so the render never iterates characters or prints a literal "None".
+    if isinstance(summary_pts, str):
+        summary_pts = [summary_pts]
+    summary_pts = [str(s) for s in summary_pts if s is not None] if isinstance(summary_pts, (list, tuple)) else []
     n_opt = len(opt_f) + len(free_opts)
     n_sug = len(sug_f) + len(free_sugg)
 
@@ -257,92 +289,74 @@ def update_reviewed_prs(reviewed_prs, repo_path, pr_number, current_sha, review_
     reviewed_prs[pr_key] = entry
 
 
-# ---------------------------------------------------------------- driver (flat, fall-through)
+# ---------------------------------------------------------------- per-PR work (isolated)
 
-prs_to_review = waveassist.fetch_data("pull_requests", default=[]) or []
-should_process = any(pr.get("comment_generated") and not pr.get("comment_posted") for pr in prs_to_review)
+def process_one_pr(pr, reviewed_prs, access_token, preview):
+    """Post the review + summary for ONE pr. Returns (changed, posted_url, html_block). In preview
+    mode it posts nothing and returns the preview block. A raise here is caught by run_driver's loop
+    so one malformed PR (bad field, network blip) never sinks the rest of the batch."""
+    if not pr.get("comment_generated") or pr.get("comment_posted"):
+        return False, None, None
+    review_dict = pr.get("review_dict") or {}
+    if not review_dict:
+        return False, None, None
+    repo_path = pr.get("id")
+    pr_number = pr.get("pr_number")
+    current_sha = pr.get("current_sha", "")
+    sha_short = current_sha[:7]
+    entry = reviewed_prs.get(f"{repo_path}#{pr_number}", {})
+    # Re-key by the current finding_sig so a signature-format change across upgrades is transparent.
+    prior_ledger = rekey_ledger(entry.get("findings", {}))
+    summary_comment_id = entry.get("summary_comment_id")
+    if summary_comment_id is None and not preview:   # idempotent: reuse our marked comment, never duplicate
+        summary_comment_id = find_summary_comment_id(repo_path, pr_number, access_token)
 
-if should_process:
-    access_token = waveassist.fetch_data("github_access_token", default="") or ""
-    reviewed_prs = waveassist.fetch_data("reviewed_prs", default={}) or {}
-    preview = waveassist.is_test_run()
-    display = "<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; line-height: 1.5;\">"
-    posted_links = []
-    reviewed_prs_changed = False
+    gated = review_dict.get("findings", [])
+    is_update = bool(summary_comment_id)
+    new_ledger, inline_comments = reconcile_ledger(prior_ledger, gated, current_sha, is_update=is_update)
+    changed_files = sorted({f.get("path") for f in gated if f.get("path")})
+    summary_md = build_summary_md(review_dict, new_ledger, changed_files, sha_short,
+                                  current_sha=current_sha, is_update=is_update)
 
-    for pr in prs_to_review:
-        if not pr.get("comment_generated") or pr.get("comment_posted"):
-            continue
-        review_dict = pr.get("review_dict") or {}
-        if not review_dict:
-            continue
-        repo_path = pr.get("id")
-        pr_number = pr.get("pr_number")
-        current_sha = pr.get("current_sha", "")
-        sha_short = current_sha[:7]
-        entry = reviewed_prs.get(f"{repo_path}#{pr_number}", {})
-        # Re-key by the current finding_sig so a signature-format change across upgrades is transparent.
-        prior_ledger = rekey_ledger(entry.get("findings", {}))
-        summary_comment_id = entry.get("summary_comment_id")
-        if summary_comment_id is None and not preview:   # idempotent: reuse our marked comment, never duplicate
-            summary_comment_id = find_summary_comment_id(repo_path, pr_number, access_token)
+    if preview:
+        block = (
+            f'<div style="margin-bottom:8px;color:#b26a00;">• <strong>PREVIEW</strong> — would post to '
+            f'<strong>{html.escape(str(repo_path))}</strong> PR #{pr_number} ({len(inline_comments)} inline). No write.</div>'
+            f'<details><summary>Summary preview</summary><pre style="white-space:pre-wrap;font-size:12px;">'
+            f'{html.escape(summary_md)}</pre></details>')
+        return False, None, block
 
-        gated = review_dict.get("findings", [])
-        is_update = bool(summary_comment_id)
-        new_ledger, inline_comments = reconcile_ledger(prior_ledger, gated, current_sha, is_update=is_update)
-        changed_files = sorted({f.get("path") for f in gated if f.get("path")})
-        summary_md = build_summary_md(review_dict, new_ledger, changed_files, sha_short,
-                                      current_sha=current_sha, is_update=is_update)
+    review = None
+    if inline_comments:                                   # never POST an empty review
+        review = create_pr_review(repo_path, pr_number, current_sha, "", inline_comments, access_token)
+    if summary_comment_id:
+        result = edit_summary_comment(repo_path, summary_comment_id, summary_md, access_token)
+        cid = summary_comment_id
+        label = "Updated"
+    else:
+        summary = create_summary_comment(repo_path, pr_number, summary_md, access_token)
+        result = summary
+        cid = summary.get("id") if summary else None
+        label = "Full"
 
-        if preview:
-            display += (
-                f'<div style="margin-bottom:8px;color:#b26a00;">• <strong>PREVIEW</strong> — would post to '
-                f'<strong>{html.escape(str(repo_path))}</strong> PR #{pr_number} ({len(inline_comments)} inline). No write.</div>'
-                f'<details><summary>Summary preview</summary><pre style="white-space:pre-wrap;font-size:12px;">'
-                f'{html.escape(summary_md)}</pre></details>')
-            continue
+    if not result and not review:
+        return False, None, None        # nothing posted at all → retry the whole PR next cycle (no dup)
 
-        review = None
-        if inline_comments:                                   # never POST an empty review
-            review = create_pr_review(repo_path, pr_number, current_sha, "", inline_comments, access_token)
-        if summary_comment_id:
-            result = edit_summary_comment(repo_path, summary_comment_id, summary_md, access_token)
-            cid = summary_comment_id
-            label = "Updated"
-        else:
-            summary = create_summary_comment(repo_path, pr_number, summary_md, access_token)
-            result = summary
-            cid = summary.get("id") if summary else None
-            label = "Full"
-
-        if result:
-            pr["comment_posted"] = True
-            update_reviewed_prs(reviewed_prs, repo_path, pr_number, current_sha, review_text=summary_md,
-                                summary_comment_id=cid, review_id=(review or {}).get("id"),
-                                findings_ledger=new_ledger)
-            reviewed_prs_changed = True
-            pr["files"] = []                                  # clear patches after the ledger has anchors
-            url = result.get("html_url") or f"https://github.com/{repo_path}/pull/{pr_number}"
-            display += (
-                f'<div style="margin-bottom: 8px; color: #28a745;">• {label} review posted to '
-                f'<strong>{html.escape(str(repo_path))}</strong> PR #{pr_number}. '
-                f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer" '
-                f'style="{OUTPUT_LINK_STYLE}">View on GitHub</a></div>')
-            posted_links.append(url)
-
-    if posted_links:
-        display += (f'<div style="margin-top: 10px;"><span style="{OUTPUT_URL_HINT_STYLE}">'
-                    f"If links do not open in this view, copy a URL below.</span></div>")
-        for u in posted_links:
-            display += f'<span style="{OUTPUT_URL_SELECT_STYLE}">{html.escape(u)}</span>'
-    display += "</div>"
-
-    if not preview:
-        if reviewed_prs_changed:
-            waveassist.store_data("reviewed_prs", reviewed_prs, data_type="json")
-        waveassist.store_data("pull_requests", [], data_type="json")
-    waveassist.store_data("display_output", {"html_content": display}, run_based=True, data_type="json")
-    print(f"✅ post_comment done (preview={preview}, posted={len(posted_links)}).")
+    # Record the ledger as soon as ANYTHING posted, so already-posted inline comments are never
+    # re-posted as "new" on a later run — even if the summary comment failed this run.
+    update_reviewed_prs(reviewed_prs, repo_path, pr_number, current_sha, review_text=summary_md,
+                        summary_comment_id=cid, review_id=(review or {}).get("id"),
+                        findings_ledger=new_ledger)
+    if result:
+        pr["comment_posted"] = True                       # fully done only when the summary is up too
+        pr["files"] = []                                  # clear patches after the ledger has anchors
+    url = (result or {}).get("html_url") or f"https://github.com/{repo_path}/pull/{pr_number}"
+    block = (
+        f'<div style="margin-bottom: 8px; color: #28a745;">• {label} review posted to '
+        f'<strong>{html.escape(str(repo_path))}</strong> PR #{pr_number}. '
+        f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer" '
+        f'style="{OUTPUT_LINK_STYLE}">View on GitHub</a></div>')
+    return True, url, block
 
 
 def release_run_lock():
@@ -350,8 +364,8 @@ def release_run_lock():
     it (token match). `run_lock_token` is run-based, so it MUST be read run-based here, matching
     how check_credits_and_init writes it — only the acquiring run reads back its own token; a
     skipped/overlapping cycle never wrote one, so under its own run id it reads "" and bails out,
-    and can never free the holder's lock. As the last node in the DAG, reaching here means the run
-    is done; a crashed run leaves the lock to expire via its TTL instead."""
+    and can never free the holder's lock. Called from run_driver's finally so the lock is freed even
+    if the run crashes mid-way (instead of waiting out the TTL)."""
     my_token = waveassist.fetch_data("run_lock_token", run_based=True, default="") or ""
     if not my_token:
         return  # this cycle didn't acquire the lock (skip or crash) — nothing to release
@@ -361,4 +375,50 @@ def release_run_lock():
         print("GitZoid: released run lock.")
 
 
-release_run_lock()
+# ---------------------------------------------------------------- driver (flat, fall-through)
+
+def run_driver():
+    """Post reviews for every generated-but-unposted PR. Each PR is isolated (one bad PR never sinks
+    the rest), and the run-lock is released in a finally so a crash anywhere never leaks it."""
+    prs_to_review = waveassist.fetch_data("pull_requests", default=[]) or []
+    should_process = any(pr.get("comment_generated") and not pr.get("comment_posted") for pr in prs_to_review)
+    try:
+        if should_process:
+            access_token = waveassist.fetch_data("github_access_token", default="") or ""
+            reviewed_prs = waveassist.fetch_data("reviewed_prs", default={}) or {}
+            preview = waveassist.is_test_run()
+            display = "<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; line-height: 1.5;\">"
+            posted_links = []
+            reviewed_prs_changed = False
+
+            for pr in prs_to_review:
+                try:
+                    changed, url, block = process_one_pr(pr, reviewed_prs, access_token, preview)
+                except Exception as e:
+                    print(f"❌ post_comment: PR #{pr.get('pr_number')} ({pr.get('id')}) failed: {e}")
+                    continue
+                if block:
+                    display += block
+                if changed:
+                    reviewed_prs_changed = True
+                if url:
+                    posted_links.append(url)
+
+            if posted_links:
+                display += (f'<div style="margin-top: 10px;"><span style="{OUTPUT_URL_HINT_STYLE}">'
+                            f"If links do not open in this view, copy a URL below.</span></div>")
+                for u in posted_links:
+                    display += f'<span style="{OUTPUT_URL_SELECT_STYLE}">{html.escape(u)}</span>'
+            display += "</div>"
+
+            if not preview:
+                if reviewed_prs_changed:
+                    waveassist.store_data("reviewed_prs", reviewed_prs, data_type="json")
+                waveassist.store_data("pull_requests", [], data_type="json")
+            waveassist.store_data("display_output", {"html_content": display}, run_based=True, data_type="json")
+            print(f"✅ post_comment done (preview={preview}, posted={len(posted_links)}).")
+    finally:
+        release_run_lock()
+
+
+run_driver()
