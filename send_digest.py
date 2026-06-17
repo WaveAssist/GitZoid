@@ -106,14 +106,15 @@ def render_security_rollup_html(rollup) -> str:
 
 
 def build_subject(group_name, period_end="", implicit=False) -> str:
-    """Branded subject: brand + week. The implicit/unnamed single group reads as "Your GitZoid digest";
-    a named group is prefixed with its label. The bare "All repositories" default is never surfaced.
-    Plain text. The em dash here is the separator only (not a clause connector)."""
-    week = f"week of {period_end}" if period_end else "weekly update"
+    """Branded subject in the same shape as the security alert ("GitZoid Security: ..."):
+    "GitZoid Digest: Week of <date>" for the implicit/unnamed single group; a named group is inserted
+    before the week. The bare "All repositories" default is never surfaced. Plain text."""
+    week = f"Week of {period_end}" if period_end else "Weekly update"
     name = (group_name or "").strip()
-    if implicit or not name or name == "All repositories":
-        return f"Your GitZoid digest — {week}"
-    return f"{name} — GitZoid digest — {week}"
+    # The project name reads as part of the brand phrase: "GitZoid Sacred Walks Digest" — nicer than
+    # tacking it on after an em dash. No name configured -> just "GitZoid Digest".
+    brand = "GitZoid Digest" if (implicit or not name or name == "All repositories") else f"GitZoid {name} Digest"
+    return f"{brand}: {week}"
 
 
 def group_generation_failed(business_report, technical_report) -> bool:

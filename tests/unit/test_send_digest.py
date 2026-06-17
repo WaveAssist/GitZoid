@@ -83,18 +83,19 @@ class TestBuildSubject:
 
     def test_subject_is_branded(self):
         s = build_subject("Acme", "Jun 15")
-        assert "GitZoid digest" in s
-        assert "Acme" in s
-        assert "week of Jun 15" in s
+        assert s == "GitZoid Acme Digest: Week of Jun 15"   # name inside the brand phrase
+
+    def test_named_group_inside_brand_phrase(self):
+        assert build_subject("Sacred Walks", "Jun 15") == "GitZoid Sacred Walks Digest: Week of Jun 15"
 
     def test_implicit_group_subject_has_no_all_repositories(self):
         s = build_subject("All repositories", "Jun 15", implicit=True)
         assert "All repositories" not in s
-        assert s == "Your GitZoid digest — week of Jun 15"
+        assert s == "GitZoid Digest: Week of Jun 15"
 
     def test_unnamed_group_is_branded(self):
         s = build_subject("", "Jun 15")
-        assert s == "Your GitZoid digest — week of Jun 15"
+        assert s == "GitZoid Digest: Week of Jun 15"
 
     def test_all_repositories_suppressed_even_without_flag(self):
         s = build_subject("All repositories", "Jun 15")
