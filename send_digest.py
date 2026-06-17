@@ -105,16 +105,21 @@ def render_security_rollup_html(rollup) -> str:
     return f"<h2>🔒 SECURITY</h2>{body}"
 
 
+def digest_title(group_name, implicit=False) -> str:
+    """Brand title shared by the inbox SUBJECT and the email H1 so the two always match. Unnamed/
+    implicit -> "GitZoid Digest"; a named group reads as "GitZoid <name> Digest". The bare
+    "All repositories" default is never surfaced."""
+    name = (group_name or "").strip()
+    if implicit or not name or name == "All repositories":
+        return "GitZoid Digest"
+    return f"GitZoid {name} Digest"
+
+
 def build_subject(group_name, period_end="", implicit=False) -> str:
     """Branded subject in the same shape as the security alert ("GitZoid Security: ..."):
-    "GitZoid Digest: Week of <date>" for the implicit/unnamed single group; a named group is inserted
-    before the week. The bare "All repositories" default is never surfaced. Plain text."""
+    "GitZoid <name> Digest: Week of <date>" (or just "GitZoid Digest:" when unnamed)."""
     week = f"Week of {period_end}" if period_end else "Weekly update"
-    name = (group_name or "").strip()
-    # The project name reads as part of the brand phrase: "GitZoid Sacred Walks Digest" — nicer than
-    # tacking it on after an em dash. No name configured -> just "GitZoid Digest".
-    brand = "GitZoid Digest" if (implicit or not name or name == "All repositories") else f"GitZoid {name} Digest"
-    return f"{brand}: {week}"
+    return f"{digest_title(group_name, implicit)}: {week}"
 
 
 def group_generation_failed(business_report, technical_report) -> bool:
@@ -165,8 +170,8 @@ li { margin: 4px 0; line-height: 1.45; }
 
 
 def build_email_html(group_name, business_report, technical_report, stats, date_range, implicit=False) -> str:
-    """The combined per-group digest email (also rendered to PDF). The H1 is the stable brand title
-    "Knowledge Digest"; a named, non-implicit group's label becomes the scope subtitle below it."""
+    """The combined per-group digest email (also rendered to PDF). The H1 matches the inbox subject's
+    brand title (digest_title): "GitZoid <name> Digest" for a named group, "GitZoid Digest" unnamed."""
     business_report = business_report or {}
     technical_report = technical_report or {}
     summary = business_report.get("executive_summary", "No summary available.")
@@ -193,8 +198,6 @@ def build_email_html(group_name, business_report, technical_report, stats, date_
         # found" line otherwise runs straight into the poem).
         poem_divider = "<hr style='border:0;border-top:1px solid #e5e7eb;margin:22px 0' />"
 
-    name = (group_name or "").strip()
-    scope = "" if (implicit or not name or name == "All repositories") else f"<div class='subtitle'>{_esc(name)}</div>"
     period = ""
     if date_range and date_range.get("start_date_formatted"):
         period = (f"<div class='subtitle'>Report period: {_esc(date_range.get('start_date_formatted'))} - "
@@ -202,7 +205,7 @@ def build_email_html(group_name, business_report, technical_report, stats, date_
 
     return f"""<html><head><meta charset="utf-8" /><style>{_STYLE}</style></head><body>
 <div class="container">
-  <div class="header"><h1>Knowledge Digest</h1>{scope}{period}</div>
+  <div class="header"><h1>{_esc(digest_title(group_name, implicit))}</h1>{period}</div>
   <table class="stats-bar" role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>
     <td><div class="stat-value">{stats.get('commits', 0)}</div><div class="stat-label">Commits</div></td>
     <td><div class="stat-value">{stats.get('contributors', 0)}</div><div class="stat-label">Contributors</div></td>

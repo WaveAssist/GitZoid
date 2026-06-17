@@ -117,19 +117,18 @@ class TestBuildEmailHtml:
         assert "SQLi" in html                  # security roll-up rendered
         assert "one" in html                   # poem
 
-    def test_h1_is_brand_not_group_label(self):
+    def test_h1_matches_subject_brand_title(self):
         html = build_email_html(
-            "Acme",
+            "Sacred Walks",
             {"executive_summary": "s", "shipped_features": []},
             {"repository_deep_dive": [], "poem": [],
              "security_rollup": {"counts": {"new": 0, "still_open": 0, "resolved": 0}}},
             {"commits": 1, "contributors": 1, "total_repos": 1, "active_repos": 1},
             {})
-        assert "<h1>Knowledge Digest</h1>" in html
-        assert "<h1>Acme</h1>" not in html          # group label is no longer the H1
-        assert "Acme" in html                        # it moved to the subtitle scope
+        assert "<h1>GitZoid Sacred Walks Digest</h1>" in html   # H1 == the subject's brand title
+        assert "Knowledge Digest" not in html                    # no second, different title
 
-    def test_implicit_group_no_scope_label(self):
+    def test_implicit_group_h1_is_plain_brand(self):
         html = build_email_html(
             "All repositories",
             {"executive_summary": "s", "shipped_features": []},
@@ -137,7 +136,7 @@ class TestBuildEmailHtml:
              "security_rollup": {"counts": {"new": 0, "still_open": 0, "resolved": 0}}},
             {"commits": 1, "contributors": 1, "total_repos": 1, "active_repos": 1},
             {}, implicit=True)
-        assert "<h1>Knowledge Digest</h1>" in html
+        assert "<h1>GitZoid Digest</h1>" in html
         assert "All repositories" not in html
 
     def test_stats_render_as_table_one_row(self):
