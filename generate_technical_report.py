@@ -23,7 +23,7 @@ waveassist.init()   # credits gated once upstream in digest_check_and_init
 print("GitZoid Digest: starting technical report generation (generate_technical_report) node")
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
-MAX_TOKENS = 6000
+MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
 TEMPERATURE = 0.4
 ROLLUP_WINDOW_DAYS = 7
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}

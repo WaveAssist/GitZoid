@@ -36,7 +36,7 @@ KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulner
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.15
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
-MAX_ASSESS_TOKENS = 1200
+MAX_ASSESS_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
 MAX_DEPS_PER_REPO = 1500              # OSV querybatch sanity cap
 
 # Lockfiles are authoritative (concrete pinned versions). Manifests are a fallback used only when a

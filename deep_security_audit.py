@@ -37,7 +37,7 @@ HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.15
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 AUDIT_SAFETY_DAYS = 8   # a missed audit-day still runs within ~a week (safety net)
-MAX_AUDIT_TOKENS = 4096
+MAX_AUDIT_TOKENS = 16000   # reasoning/"pro" models spend this on hidden reasoning too
 RUN_TIME_BUDGET_SECONDS = 1200      # ~20 min: overflow repos resume next daily tick
 
 # Scope budget: gather a broad, deterministically-discovered candidate pool, rank by security risk,
