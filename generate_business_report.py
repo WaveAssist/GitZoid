@@ -24,7 +24,7 @@ waveassist.init()   # credits gated once upstream in digest_check_and_init
 print("GitZoid Digest: starting business report generation (generate_business_report) node")
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
-MAX_TOKENS = 2500
+MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
 TEMPERATURE = 0.4
 
 

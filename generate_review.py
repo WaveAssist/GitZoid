@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 # Constants
 TOKEN_MULTIPLIER = 2.5
-MAX_TOKENS = 4096
+MAX_TOKENS = 16000   # reasoning/"pro" models spend this on hidden reasoning too
 MAX_INLINE_FINDINGS = 8
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 _SEV_RANK = {"high": 0, "medium": 1, "low": 2}
