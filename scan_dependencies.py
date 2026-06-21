@@ -6,8 +6,11 @@ and matches them against the free public vulnerability database OSV.dev (no API 
 cross-checked against the free CISA "Known Exploited Vulnerabilities" feed (the "being hacked right
 now" signal) and judged for reachability using the brain profile (is the package used? in the auth
 path?). A deterministic FEED GATE keeps only the ones worth a human's attention; survivors get a
-plain-English impact + a realism judgement from the configured model. Output is a list of candidate
-findings appended to the run-based `security_candidates` key, which triage_and_alert consumes.
+plain-English impact + a realism judgement from the configured model. Once a package+version has
+already been alerted to the user, newly published advisories on it are suppressed before any
+hydrate/LLM cost: the remediation ("upgrade <pkg>") is unchanged, so an extra CVE is not re-reported.
+Output is a list of candidate findings appended to the run-based `security_candidates` key, which
+triage_and_alert consumes.
 
 How it knows something is vulnerable: the feeds, not the model. The model only writes the English
 and decides whether the exploit is realistic (vs needing a chain of unlikely preconditions).
@@ -511,6 +514,32 @@ def _dep_sig(repo, name, vuln_id):
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
+def already_alerted_packages(prior_ledger) -> set:
+    """The (repo, name, version) packages we have ALREADY sent the user a real alert about: an OPEN
+    dependency finding that actually went out (`alerted`). Once the user has been told to upgrade a
+    package, a NEWLY published advisory on that same installed version does not change the action
+    (still "upgrade <name>"), so the driver suppresses it. Gated on `alerted` (not merely present in
+    the ledger) so we only silence packages the user was genuinely warned about — anything judged not
+    real, or never emailed, never entered the ledger as an alerted finding and is free to alert."""
+    out = set()
+    for e in (prior_ledger or {}).values():
+        if (isinstance(e, dict) and e.get("category") == "dependency"
+                and e.get("status") == "open" and e.get("alerted")):
+            out.add((e.get("repo"), e.get("name"), e.get("version")))
+    return out
+
+
+def suppress_new_advisory(repo, name, version, vuln_id, prior_ledger, alerted_pkgs) -> bool:
+    """True when (repo, name, version) was already alerted AND this is a genuinely NEW advisory (its
+    signature is not already in the ledger). New advisories on an already-alerted package are dropped
+    silently and BEFORE any OSV hydrate / LLM call. The advisory we originally alerted on is NOT new
+    (its sig IS in the ledger), so it still flows through the cached path below and keeps its own
+    lifecycle (escalation, fix-available, resolution) intact."""
+    if (repo, name, version) not in alerted_pkgs:
+        return False
+    return _dep_sig(repo, name, vuln_id) not in (prior_ledger or {})
+
+
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 skip = waveassist.fetch_data("security_skip_run", run_based=True, default="0") == "1"
@@ -525,6 +554,7 @@ if repositories:
     headers = _gh_headers(access_token)
     kev_set, kev_ok = fetch_kev_set_with_status()
     prior_ledger = waveassist.fetch_data("security_findings", default={}) or {}
+    alerted_pkgs = already_alerted_packages(prior_ledger)   # packages the user was already told to upgrade
     candidates = []
     scanned_ok = set()
 
@@ -553,6 +583,10 @@ if repositories:
             for (name, version), vuln_ids in osv_hits.items():
                 reach = dep_reachability(name, profile)
                 for vid in vuln_ids:
+                    if suppress_new_advisory(repo_path, name, version, vid, prior_ledger, alerted_pkgs):
+                        print(f"· {name} {version}: new advisory {vid} suppressed "
+                              f"(package already alerted; upgrade recommendation unchanged)")
+                        continue
                     full = hydrate_vuln(vid)
                     if not full:
                         continue

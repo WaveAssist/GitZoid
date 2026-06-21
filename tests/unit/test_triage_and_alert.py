@@ -426,6 +426,41 @@ class TestDependencyGrouping:
         assert "No fixed version" in out
 
 
+class TestDependencySectionDesign:
+    """Dependencies render as their own clearly-marked section at the END of the email, in a calm
+    slate accent with a labelled header + one-line explainer, visually distinct from the red
+    code/access blocks above."""
+
+    def _code(self):
+        return {"category": "authz", "repo": "o/r", "title": "auth bypass", "severity": "high",
+                "impact": "reads any user data", "entry_point": "/x"}
+
+    def _dep(self):
+        return {"category": "dependency", "repo": "o/r", "name": "django", "version": "1.6",
+                "vuln_id": "CVE-1", "severity": "high", "fix": "4.2", "impact": "remote code execution"}
+
+    def test_section_has_label_and_explainer(self):
+        out = build_alert_email([], [self._dep()], scanned_repos=1)
+        assert "Vulnerable dependencies" in out
+        assert "The fix is to upgrade the package." in out
+
+    def test_dep_blocks_slate_code_blocks_red_and_after(self):
+        out = build_alert_email([self._code()], [self._dep()], scanned_repos=1)
+        assert "border-left:4px solid #475569" in out      # dependency block = slate accent
+        assert "border-left:4px solid #b91c1c" in out      # code/access block = red accent
+        assert out.index("#b91c1c") < out.index("#475569")  # code section renders before deps
+
+    def test_divider_only_when_both_sections_present(self):
+        rule = "height:1px;background:#e5e7eb"
+        assert rule in build_alert_email([self._code()], [self._dep()], scanned_repos=1)
+        assert rule not in build_alert_email([], [self._dep()], scanned_repos=1)   # deps-only: no stray rule
+
+    def test_design_stays_clean_no_emoji_or_emdash(self):
+        out = build_alert_email([self._code()], [self._dep()], scanned_repos=1)
+        for ch in EMOJI:
+            assert ch not in out
+
+
 class TestIssueCountGrouped:
     """The header/subject 'N issues' must count GROUPED issues (a package = 1), not raw CVEs —
     so 12 Django advisories shown as one block count as one issue, not twelve."""

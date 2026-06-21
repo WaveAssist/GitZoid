@@ -322,3 +322,55 @@ class TestKevStatus:
         monkeypatch.setattr(sd.requests, "get", boom)
         s, ok = fetch_kev_set_with_status()
         assert ok is False and s == set()
+
+
+class TestAlreadyAlertedSuppression:
+    """Once a package+version was actually ALERTED (open finding that went out), a newly published
+    advisory on the same installed version is suppressed before any hydrate/LLM cost — the
+    remediation ('upgrade <pkg>') is unchanged. The originally-alerted advisory keeps flowing."""
+
+    def _ledger(self, **over):
+        e = {"category": "dependency", "repo": "o/r", "name": "django", "version": "1.6",
+             "status": "open", "alerted": True}
+        e.update(over)
+        return {sd._dep_sig("o/r", "django", "CVE-OLD"): e}
+
+    def test_collects_open_alerted_dependency_packages(self):
+        assert sd.already_alerted_packages(self._ledger()) == {("o/r", "django", "1.6")}
+
+    def test_ignores_resolved_unalerted_and_code_entries(self):
+        led = {
+            "a": {"category": "dependency", "repo": "o/r", "name": "a", "version": "1",
+                  "status": "resolved", "alerted": True},          # resolved → not active
+            "b": {"category": "dependency", "repo": "o/r", "name": "b", "version": "1",
+                  "status": "open", "alerted": False},             # never actually sent
+            "c": {"category": "authz", "repo": "o/r", "name": None, "version": None,
+                  "status": "open", "alerted": True},              # code finding, not a dep
+        }
+        assert sd.already_alerted_packages(led) == set()
+
+    def test_new_cve_on_alerted_package_suppressed(self):
+        led = self._ledger()
+        pkgs = sd.already_alerted_packages(led)
+        assert sd.suppress_new_advisory("o/r", "django", "1.6", "CVE-NEW", led, pkgs) is True
+
+    def test_original_advisory_not_suppressed(self):
+        # the advisory already in the ledger must keep flowing, else triage would falsely resolve it
+        led = self._ledger()
+        pkgs = sd.already_alerted_packages(led)
+        assert sd.suppress_new_advisory("o/r", "django", "1.6", "CVE-OLD", led, pkgs) is False
+
+    def test_never_alerted_package_not_suppressed(self):
+        led = self._ledger()
+        pkgs = sd.already_alerted_packages(led)
+        assert sd.suppress_new_advisory("o/r", "lodash", "4.1", "CVE-X", led, pkgs) is False
+
+    def test_new_version_after_upgrade_not_suppressed(self):
+        # user upgraded django 1.6 -> 2.0; advisories on the NEW installed version must still alert
+        led = self._ledger()
+        pkgs = sd.already_alerted_packages(led)
+        assert sd.suppress_new_advisory("o/r", "django", "2.0", "CVE-NEW", led, pkgs) is False
+
+    def test_empty_ledger_suppresses_nothing(self):
+        assert sd.already_alerted_packages({}) == set()
+        assert sd.suppress_new_advisory("o/r", "django", "1.6", "CVE-NEW", {}, set()) is False

@@ -134,34 +134,9 @@ variables:
     helper_message: "Connect your GitHub account to the app"
     display_type: "base"
 
-  # Single global model for ALL repos (not per-repo). Code reads `model_name` via fetch_data and
-  # falls back to the default if unset.
-  - name: model_name
-    key: model_name
-    display_name: Model
-    type: select
-    is_optional: true
-    default_value: "anthropic/claude-sonnet-4.6"
-    helper_message: "The AI model GitZoid uses to review every pull request"
-    options:
-      - name: Claude Sonnet 4.6
-        key: anthropic/claude-sonnet-4.6
-      - name: Claude Haiku 4.5
-        key: anthropic/claude-haiku-4.5
-      - name: Claude Opus 4.6
-        key: anthropic/claude-opus-4.6
-      - name: Grok Code Fast 1
-        key: x-ai/grok-code-fast-1
-      - name: Gemini 3 Flash
-        key: google/gemini-3-flash-preview
-      - name: DeepSeek V3.2
-        key: deepseek/deepseek-v3.2
-      - name: Gemini 3.1 Pro
-        key: google/gemini-3.1-pro-preview
-      - name: GPT-5.2
-        key: openai/gpt-5.2
-      - name: Minimax M2.5
-        key: minimax/minimax-m2.5
+  # Model is fixed to Claude Sonnet 4.6 for ALL repos — no user selection. Code reads `model_name`
+  # via fetch_data and falls back to DEFAULT_MODEL ("anthropic/claude-sonnet-4.6") when unset, so
+  # omitting this variable makes every run use Sonnet.
 
   # Security Watch toggle. Default ON (existing + new users). Turning it off skips the whole security
   # chain cleanly (no failed runs). The daily scan is silent unless it finds something real.

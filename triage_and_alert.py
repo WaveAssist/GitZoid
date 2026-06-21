@@ -256,7 +256,9 @@ def _max_version(versions):
 def _dep_group_block(group):
     """One block for ALL advisories affecting the same (repo, package, version). Shows the worst
     severity, a count, the single recommended upgrade, the worst-case impact, and every reference —
-    so 13 Django CVEs read as one 'Django 4.2 — 13 issues, upgrade to X' entry, not 13 conflicting ones."""
+    so 13 Django CVEs read as one 'Django 4.2 — 13 issues, upgrade to X' entry, not 13 conflicting ones.
+    Rendered in a calm slate accent (not the red of code/access holes) so routine package upgrades
+    never carry the same visual urgency as an exploitable code finding (issue #4)."""
     by_sev = sorted(group, key=lambda g: _SEV_RANK.get(g.get("severity"), 4))
     worst = by_sev[0]
     repo = html.escape(str(worst.get("repo") or ""))
@@ -281,19 +283,22 @@ def _dep_group_block(group):
         if r:
             refs.append(r)
     refs = list(dict.fromkeys(refs))   # de-dupe, keep order
-    ref_line = (f"<div style='color:#888;font-size:11px;margin-top:4px'>"
+    ref_line = (f"<div style='color:#9aa3af;font-size:11px;margin-top:4px'>"
                 f"{'References' if len(refs) > 1 else 'Reference'}: {html.escape(', '.join(refs))}</div>"
                 if refs else "")
     header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
-    return (f"<div style='margin:12px 0;padding:11px 13px;border-left:4px solid #b91c1c;background:#fbf6f6'>"
-            f"<div>{header}</div>"
-            f"<div style='font-weight:600;margin-top:3px'>{pkg}</div>{count_line}"
-            f"<div style='margin-top:4px'>{impact}</div>{fix_line}{ref_line}</div>")
+    return (f"<div style='margin:10px 0;padding:11px 13px;border-left:4px solid #475569;background:#f8fafc'>"
+            f"<div style='color:#475569;font-size:13px'>{header}</div>"
+            f"<div style='font-weight:600;margin-top:3px;color:#1f2937'>{pkg}</div>{count_line}"
+            f"<div style='margin-top:4px;color:#374151'>{impact}</div>{fix_line}{ref_line}</div>")
 
 
 def _dep_section(dep_findings):
-    """The 'Vulnerable dependencies' section, grouped one block per (repo, package, version) so the
-    same package's many advisories consolidate instead of repeating with conflicting fixes (issue #1)."""
+    """The 'Vulnerable dependencies' section: its own clearly-marked block at the END of the email
+    (below code/access issues), introduced by a labelled header and a one-line explainer so it reads
+    as a distinct, lower-temperature category — routine package upgrades, not code holes (issue #4).
+    Grouped one block per (repo, package, version) so a package's many advisories consolidate instead
+    of repeating with conflicting fixes (issue #1)."""
     if not dep_findings:
         return ""
     groups, order = {}, []
@@ -304,7 +309,12 @@ def _dep_section(dep_findings):
             order.append(k)
         groups[k].append(f)
     blocks = "".join(_dep_group_block(groups[k]) for k in order)
-    return "<h3 style='margin:18px 0 2px;font-size:14px;color:#374151'>Vulnerable dependencies</h3>" + blocks
+    header = ("<div style='margin:20px 0 10px'>"
+              "<div style='font-size:11px;font-weight:700;letter-spacing:.08em;color:#475569;"
+              "text-transform:uppercase'>Vulnerable dependencies</div>"
+              "<div style='color:#6b7280;font-size:12px;margin-top:3px'>Known vulnerabilities in "
+              "third-party packages you depend on. The fix is to upgrade the package.</div></div>")
+    return header + blocks
 
 
 def _issue_count(findings):
@@ -326,7 +336,13 @@ def build_alert_email(code_findings, dep_findings, scanned_repos):
             f"<h2 style='margin:0 0 4px;font-size:18px'>GitZoid Security Review</h2>"
             f"<div style='color:#666;font-size:12px'>{n} issue{'s' if n != 1 else ''} found across {scanned_repos} "
             f"repositor{'ies' if scanned_repos != 1 else 'y'}. Only real, exploitable issues are shown.</div>")
-    body = _section("Code and access issues", code_findings) + _dep_section(dep_findings)
+    # A thin divider separates the two sections only when BOTH are present, so a deps-only email does
+    # not open with a stray rule.
+    code_html = _section("Code and access issues", code_findings)
+    dep_html = _dep_section(dep_findings)
+    divider = ("<div style='height:1px;background:#e5e7eb;margin:26px 0 0'></div>"
+               if code_html and dep_html else "")
+    body = code_html + divider + dep_html
     foot = ("<div style='margin-top:14px;color:#888;font-size:11px'>"
             "GitZoid stays silent unless it finds something real, and will not re-alert you about an "
             "issue you have already seen.</div></div>")
