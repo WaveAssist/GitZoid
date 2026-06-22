@@ -173,3 +173,45 @@ class TestDriver:
         assert reports["front"]["shipped_features"] == []        # empty_report shape preserved
         # history not advanced on failure
         assert "business_report_history" not in (stored.get("digest_state", {}).get("front", {}) or {})
+
+    def test_upstream_analysis_failure_flags_skip_no_llm(self, monkeypatch):
+        """A repo whose analysis FAILED upstream (analysis_failed) with no changes must NOT be rendered
+        as a quiet week: flag generation_failed so send_digest skips it. No LLM is called."""
+        groups = [{"name": "Front", "repos": ["o/x"], "recipients": [], "slug": "front"}]
+        analyses = [{"repository": "o/x", "changes": [], "commit_count": 7, "analysis_failed": True}]
+        stored = self._run(monkeypatch, {
+            "digest_skip_run": "0", "digest_resolved_groups": groups,
+            "repository_analyses": analyses, "digest_state": {},
+        }, llm=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM on failed analysis")))
+        assert stored["digest_business_reports"]["front"]["generation_failed"] is True
+
+    def test_commits_but_no_changes_is_honest_maintenance_not_quiet(self, monkeypatch):
+        """Commits landed but nothing user-facing: honest 'maintenance' wording (matches the commit
+        counter), NOT 'No development activity', and NOT flagged failed. No LLM."""
+        groups = [{"name": "Front", "repos": ["o/x"], "recipients": [], "slug": "front"}]
+        analyses = [{"repository": "o/x", "changes": [], "commit_count": 7, "analysis_failed": False}]
+        stored = self._run(monkeypatch, {
+            "digest_skip_run": "0", "digest_resolved_groups": groups,
+            "repository_analyses": analyses, "digest_state": {},
+        }, llm=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM for maintenance week")))
+        rep = stored["digest_business_reports"]["front"]
+        assert "7 commits" in rep["executive_summary"]
+        assert "No development activity" not in rep["executive_summary"]
+        assert not rep.get("generation_failed")
+        assert rep["shipped_features"] == []
+
+
+class TestEmptyWeekHelpers:
+    def test_maintenance_report_wording_plural_and_singular(self):
+        from generate_business_report import maintenance_report
+        assert "7 commits" in maintenance_report("Acme", 7)["executive_summary"]
+        assert "1 commit " in maintenance_report("Acme", 1)["executive_summary"]
+        assert maintenance_report("Acme", 7)["shipped_features"] == []
+
+    def test_group_commit_count_and_failed(self):
+        from generate_business_report import group_commit_count, group_analysis_failed
+        a = [{"commit_count": 3}, {"commit_count": 4, "analysis_failed": True}]
+        assert group_commit_count(a) == 7
+        assert group_analysis_failed(a) is True
+        assert group_analysis_failed([{"commit_count": 2}]) is False
+        assert group_commit_count([]) == 0

@@ -150,7 +150,23 @@ class TestDriver:
         }, llm=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM for a quiet group")))
         reports = stored.get("digest_technical_reports")
         assert not reports["idle"].get("generation_failed")
-        assert reports["idle"]["poem"] == QUIET_POEM           # quiet week keeps the QUIET poem
+        assert reports["idle"]["poem"] == QUIET_POEM              # genuinely idle (0 commits) keeps the poem
+
+    def test_maintenance_week_drops_quiet_poem(self, monkeypatch):
+        """Commits landed but no user-facing changes: the 'quiet repos / untouched branches' poem would
+        contradict the commit counter, so it is dropped. Deep dive empty, security roll-up still ships."""
+        groups = [{"name": "Maint", "repos": ["o/a"], "recipients": [], "slug": "maint"}]
+        stored = self._run(monkeypatch, {
+            "digest_skip_run": "0",
+            "digest_resolved_groups": groups,
+            "repository_analyses": [{"repository": "o/a", "changes": [], "commit_count": 7}],
+            "digest_business_reports": {},
+            "security_findings": recent_ledger(),
+        }, llm=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM for a maintenance group")))
+        rep = stored["digest_technical_reports"]["maint"]
+        assert rep["poem"] == []                                  # poem suppressed when commits exist
+        assert rep["repository_deep_dive"] == []
+        assert "security_rollup" in rep
 
     def test_no_fallback_poem_rendered(self, monkeypatch):
         """When call_llm RAISES on an active group, flag generation_failed, render NO poem (no fallback),

@@ -49,8 +49,11 @@ LOCK_TTL_SECONDS = 3600   # 60 min
 # Upfront progress-bar budget (seconds). The per-repo activity analysis (0-7+ LLM calls over a week of
 # diffs) dominates a digest run; the two report syntheses + email/PDF are a small fixed tail. Budget per
 # repo so the dashboard bar shows from second 0. Over-estimating is safe: the frontend caps the bar at 80%.
-DIGEST_SECONDS_PER_REPO = 150  # budget for a week of diff analysis per repo (fetch + tiered LLM);
-                               # measured ~130-220s/repo end-to-end, so a slight over-estimate is right
+DIGEST_SECONDS_PER_REPO = 240  # budget for a week of diff analysis per repo (per-commit diff fetch +
+                               # tiered LLM). The old 150 was calibrated for the fast OpenRouter API; on
+                               # the Claude CLI (subprocess, tens of seconds per call) real time runs
+                               # higher, so the bar was finishing long before the run. Over-estimating is
+                               # safe (frontend caps the bar at 80%); tune down once a Haiku run is measured.
 DIGEST_BASE_SECONDS = 30       # business + technical report synthesis + render/send
 
 

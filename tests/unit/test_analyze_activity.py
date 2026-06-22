@@ -137,3 +137,63 @@ class TestDriverSkip:
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM on skip")))
         runpy.run_path("analyze_activity.py", run_name="__main__")
         assert "repository_analyses" not in stored
+
+
+class TestProcessRepositoryFailureSignal:
+    """process_repository must distinguish a real LLM failure from a genuinely empty result, and
+    always report commit_count, so the digest can tell a quiet week from a broken analysis."""
+
+    def _commits(self, n=2):
+        return [{"sha": f"s{i}", "timestamp": "2026-06-20T10:00:00Z", "message": f"m{i}",
+                 "author": "u"} for i in range(n)]
+
+    def test_no_commits_clean(self):
+        import analyze_activity as aa
+        out = aa.process_repository("o/r", {"commits": []}, {}, {}, "m")
+        assert out == {"repository": "o/r", "changes": [], "commit_count": 0, "analysis_failed": False}
+
+    def test_llm_error_sets_analysis_failed(self, monkeypatch):
+        import analyze_activity as aa
+        monkeypatch.setattr(aa, "fetch_commit_diff", lambda *a, **k: [])
+        monkeypatch.setattr(aa, "analyze_batch", lambda *a, **k: None)      # every batch errors
+        out = aa.process_repository("o/r", {"commits": self._commits(2)}, {}, {}, "m")
+        assert out["analysis_failed"] is True
+        assert out["commit_count"] == 2
+        assert out["changes"] == []
+
+    def test_success_not_flagged_and_collects_changes(self, monkeypatch):
+        import analyze_activity as aa
+        class FakeChange:
+            def model_dump(self, by_alias=False):
+                return {"summary": "x", "category": "fix", "contributing_commits": ["s0"]}
+        class FakeResult:
+            changes = [FakeChange()]
+        monkeypatch.setattr(aa, "fetch_commit_diff", lambda *a, **k: [])
+        monkeypatch.setattr(aa, "analyze_batch", lambda *a, **k: FakeResult())
+        out = aa.process_repository("o/r", {"commits": self._commits(2)}, {}, {}, "m")
+        assert out["analysis_failed"] is False
+        assert out["commit_count"] == 2
+        assert len(out["changes"]) >= 1
+
+
+class TestAnalyzeBatchRetryCapped:
+    def test_returns_none_after_one_retry(self, monkeypatch):
+        import analyze_activity as aa
+        calls = {"n": 0}
+        def boom(*a, **k):
+            calls["n"] += 1
+            raise RuntimeError("Claude CLI failed:")
+        monkeypatch.setattr(aa.waveassist, "call_llm", boom)
+        monkeypatch.setattr(aa.time, "sleep", lambda *_: None)
+        assert aa.analyze_batch("o/r", "ctx", "", "m", attempts=2) is None
+        assert calls["n"] == 2          # one retry only — not more (cost)
+
+    def test_no_retry_on_success(self, monkeypatch):
+        import analyze_activity as aa
+        calls = {"n": 0}
+        def ok(*a, **k):
+            calls["n"] += 1
+            return "RESULT"
+        monkeypatch.setattr(aa.waveassist, "call_llm", ok)
+        assert aa.analyze_batch("o/r", "ctx", "", "m", attempts=2) == "RESULT"
+        assert calls["n"] == 1

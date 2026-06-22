@@ -114,6 +114,25 @@ def empty_report(project_name):
             "shipped_features": []}
 
 
+def maintenance_report(project_name, commit_count):
+    """Honest wording for a week that HAD commits but no user-facing changes. Prevents the contradiction
+    of a 'no activity' summary sitting next to a non-zero commit counter in the email."""
+    word = "commit" if commit_count == 1 else "commits"
+    return {"executive_summary": (f"{commit_count} {word} landed for {project_name} this week, all "
+                                  f"maintenance or internal work, with nothing user-facing to report."),
+            "shipped_features": []}
+
+
+def group_commit_count(analyses):
+    return sum(int(a.get("commit_count", 0) or 0) for a in (analyses or []))
+
+
+def group_analysis_failed(analyses):
+    """True if ANY repo in the group failed analysis (LLM/diff error). We then refuse to call it a quiet
+    week — better to send nothing than a false 'nothing shipped'."""
+    return any(a.get("analysis_failed") for a in (analyses or []))
+
+
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 skip = waveassist.fetch_data("digest_skip_run", run_based=True, default="0") == "1"
@@ -136,8 +155,23 @@ if groups:
         state = digest_state.get(slug) or {}
 
         if count_changes(analyses) == 0:
+            # No user-facing changes. Three sub-cases, and only the last is a real "quiet week":
+            if group_analysis_failed(analyses):
+                # The analysis broke (e.g. transient `Claude CLI failed:`). NOT a quiet week — flag so
+                # send_digest's existing generation_failed gate skips this group (no false email).
+                rep = empty_report(name)
+                rep["generation_failed"] = True
+                business_reports[slug] = rep
+                print(f"⚠️ {slug}: upstream analysis failed; flagged to skip (no false 'quiet week' email)")
+                continue
+            commits = group_commit_count(analyses)
+            if commits > 0:
+                # Commits happened but nothing user-facing — say so honestly (matches the commit counter).
+                business_reports[slug] = maintenance_report(name, commits)
+                print(f"· {slug}: {commits} commit(s), no user-facing changes; maintenance-week report")
+                continue
             business_reports[slug] = empty_report(name)
-            print(f"· {slug}: no activity; empty business report")
+            print(f"· {slug}: genuinely quiet (no commits); empty business report")
             continue
 
         profiles = {a["repository"]: (waveassist.fetch_data(f"profile:{a['repository']}", default={}) or {})

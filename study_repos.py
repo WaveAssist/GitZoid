@@ -31,9 +31,11 @@ PROFILE_TTL_DAYS = 14                # brain refreshes every 14 days (time-based
 TREE_BLOB_CAP = 800
 FILE_CHAR_CAP = 10000
 MAX_ACTIVE_BRANCH_SCAN = 10          # cap branch date lookups (rate-limit care)
-# The brain is rare (weekly) + quality-critical, so it uses a strong model decoupled from the
-# cheaper per-PR review model. Optional override via the "brain_model" data key.
-BRAIN_MODEL = "anthropic/claude-sonnet-4.6"
+# The brain is repo CONTEXT (architecture/conventions/deps) consumed by other nodes, not a user-facing
+# artifact, so it runs on the cheaper, faster Haiku to save credits — it is also the biggest token
+# consumer (it reads the repo). Decoupled from the per-PR review model; optional override via the
+# "brain_model" data key.
+BRAIN_MODEL = "anthropic/claude-haiku-4.5"
 
 KEY_FILE_HINTS = ("auth", "login", "session", "security", "middleware",
                   "route", "router", "api", "settings", "config", "server", "app")
@@ -404,7 +406,7 @@ for repo in repositories:
         profile = call_llm_with_retry(
             model_name,
             build_brain_prompt(repo_path, chosen["branch"], readme, manifests, key_files, file_list),
-            RepoContextProfileV2, attempts=3)
+            RepoContextProfileV2, attempts=2)   # one retry only — each Claude CLI call costs
         profile_dict = _sanitize_profile(profile.model_dump())
         profile_dict["_fingerprint"] = {"sha": chosen["sha"], "branch": chosen["branch"],
                                         "built_at": datetime.now(timezone.utc).isoformat(),

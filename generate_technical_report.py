@@ -58,6 +58,10 @@ def count_changes(analyses):
     return sum(len(a.get("changes", []) or []) for a in (analyses or []))
 
 
+def group_commit_count(analyses):
+    return sum(int(a.get("commit_count", 0) or 0) for a in (analyses or []))
+
+
 def build_changes_context(analyses) -> str:
     result = {a.get("repository", "Unknown"): a.get("changes", [])
               for a in (analyses or []) if a.get("changes")}
@@ -210,7 +214,10 @@ if groups:
 
         if count_changes(analyses) == 0:
             # Quiet code week, but the security roll-up still ships the reassurance. No LLM needed.
-            technical_reports[slug] = {"repository_deep_dive": [], "poem": QUIET_POEM,
+            # The "quiet repos" poem only fits a genuinely idle week; if commits landed (maintenance
+            # week) it would contradict the commit counter, so drop it then.
+            poem = QUIET_POEM if group_commit_count(analyses) == 0 else []
+            technical_reports[slug] = {"repository_deep_dive": [], "poem": poem,
                                        "security_rollup": rollup}
             print(f"· {slug}: no code activity; security roll-up only "
                   f"({rollup['counts']['new']} new, {rollup['counts']['resolved']} resolved)")

@@ -31,7 +31,10 @@ waveassist.init()   # credits gated once upstream in digest_check_and_init
 
 print("GitZoid Digest: starting repository activity analysis (analyze_activity) node")
 
-DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
+# Diff analysis is bulk EXTRACTION (read every commit's diff, list the changes); the business/technical
+# report nodes downstream do the user-facing writing on Sonnet. So this reads on the cheaper, faster
+# Haiku to save credits and shorten the (slow, per-repo) digest run.
+DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
 TEMPERATURE = 0.4
 RATE_SLEEP = 0.5
@@ -212,7 +215,10 @@ def fetch_commit_diff(repo_path, sha, headers) -> List[Dict[str, Any]]:
         return []
 
 
-def analyze_batch(repo_path, context, brain_section, model_name) -> Optional[RepositoryAnalysis]:
+def analyze_batch(repo_path, context, brain_section, model_name, attempts=2) -> Optional[RepositoryAnalysis]:
+    """Returns the parsed analysis, or None if the LLM call errored on EVERY attempt (a real failure,
+    distinct from a successful call that found no changes). attempts=2 is one retry — enough to ride out
+    a transient `Claude CLI failed:` blip without paying for more than one extra call."""
     prompt = f"""Analyze the following Git commits and code changes from repository {repo_path}.
 
 {brain_section}
@@ -232,19 +238,24 @@ Guidelines:
 - Combine small related commits into single logical changes.
 - Skip trivial changes (typos, formatting) unless part of a larger change.
 - Include the commit SHAs that contributed to each change."""
-    try:
-        return waveassist.call_llm(model=model_name, prompt=prompt, response_model=RepositoryAnalysis,
-                                   max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
-    except Exception as e:
-        print(f"⚠️ analysis LLM failed for {repo_path}: {e}")
-        return None
+    for i in range(attempts):
+        try:
+            return waveassist.call_llm(model=model_name, prompt=prompt, response_model=RepositoryAnalysis,
+                                       max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+        except Exception as e:
+            print(f"⚠️ analysis LLM attempt {i + 1}/{attempts} failed for {repo_path}: {e}")
+            if i < attempts - 1:
+                time.sleep(2 ** i)
+    return None
 
 
 def process_repository(repo_path, activity_data, profile, headers, model_name) -> Dict[str, Any]:
-    """One repo: fetch diffs, plan the tiered batches, run each, collect changes."""
+    """One repo: fetch diffs, plan the tiered batches, run each, collect changes. Records `commit_count`
+    and `analysis_failed` so downstream can tell a genuine quiet week from a broken analysis: an LLM
+    error (after its retry) sets analysis_failed=True, which must NOT be rendered as 'nothing shipped'."""
     commits = activity_data.get("commits", []) or []
     if not commits:
-        return {"repository": repo_path, "changes": []}
+        return {"repository": repo_path, "changes": [], "commit_count": 0, "analysis_failed": False}
 
     commit_diffs = {}
     for c in commits:
@@ -255,13 +266,16 @@ def process_repository(repo_path, activity_data, profile, headers, model_name) -
                 commit_diffs[sha] = diffs
 
     brain_section = brain_context_section(profile)
-    all_changes = []
+    all_changes, failed = [], False
     for batch in plan_batches(commits, commit_diffs):
         context = build_commit_context(batch["commits"], commit_diffs, batch["token_budget"])
         result = analyze_batch(repo_path, context, brain_section, model_name)
-        if result:
-            all_changes.extend([c.model_dump(by_alias=True) for c in result.changes])
-    return {"repository": repo_path, "changes": all_changes}
+        if result is None:
+            failed = True            # LLM errored after its retry — don't trust an empty result as "quiet"
+            continue
+        all_changes.extend([c.model_dump(by_alias=True) for c in result.changes])
+    return {"repository": repo_path, "changes": all_changes,
+            "commit_count": len(commits), "analysis_failed": failed}
 
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
@@ -287,7 +301,9 @@ if isinstance(github_activity_data, dict) and github_activity_data:
             print(f"✓ {repo_path}: {len(analysis['changes'])} change(s)")
         except Exception as e:
             print(f"⚠️ analysis failed for {repo_path}: {e}; recording empty")
-            repository_analyses.append({"repository": repo_path, "changes": []})
+            repository_analyses.append({"repository": repo_path, "changes": [],
+                                        "commit_count": len((activity_data or {}).get("commits") or []),
+                                        "analysis_failed": True})
         waveassist.store_data("repository_analyses", repository_analyses, data_type="json")
 
     total_changes = sum(len(a["changes"]) for a in repository_analyses)
