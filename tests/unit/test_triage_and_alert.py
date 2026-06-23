@@ -21,6 +21,11 @@ from triage_and_alert import (
     build_alert_email,
     build_subject,
     parse_recipients,
+    parse_groups,
+    slugify,
+    resolve_groups,
+    clean_email_list,
+    group_alerts,
     MAX_CODE_ALERTS,
 )
 
@@ -520,3 +525,222 @@ class TestSubjectMultiRepo:
     def test_kev_multi_repo_mentions_more(self):
         s = build_subject([self._f("o/a", actively_exploited=True), self._f("o/b")])
         assert "actively exploited" in s and "more" in s
+
+
+# ---------------------------------------------------------------- group routing (per-group delivery)
+# A separate `security_groups` config splits the to-alert set by repo so different repos route to
+# different people. resolve_groups/parse_groups/slugify mirror the digest's (duplicated by the same
+# no-sibling-imports convention as the lock helpers). group_alerts is the security-specific partition,
+# including the owner-only catch-all that guarantees a finding is never silently dropped.
+
+class TestParseGroups:
+    def test_list_passthrough(self):
+        g = [{"name": "A", "repos": ["o/r"], "recipients": []}]
+        assert parse_groups(g) == g
+
+    def test_json_string_parsed(self):
+        assert parse_groups('[{"name":"A","repos":["o/r"],"recipients":[]}]') == \
+            [{"name": "A", "repos": ["o/r"], "recipients": []}]
+
+    def test_garbage_and_empty_become_empty_list(self):
+        assert parse_groups("not json") == []
+        assert parse_groups("") == []
+        assert parse_groups(None) == []
+        assert parse_groups('{"not":"a list"}') == []
+
+
+class TestSlugify:
+    def test_kebab_case(self):
+        assert slugify("Acme Platform", 0) == "acme-platform"
+
+    def test_strips_punctuation(self):
+        assert slugify("  Mobile / Web!! ", 0) == "mobile-web"
+
+    def test_empty_name_falls_back_to_index(self):
+        assert slugify("", 3) == "group-4"
+        assert slugify(None, 0) == "group-1"
+
+
+class TestResolveGroups:
+    REPOS = [{"id": "o/a"}, {"id": "o/b"}, {"id": "o/c"}]
+
+    def test_explicit_groups_kept_and_intersected_with_selected(self):
+        groups = [{"name": "Front", "repos": ["o/a", "o/x"], "recipients": ["a@x.com"]}]
+        out = resolve_groups(groups, self.REPOS)
+        assert len(out) == 1
+        assert out[0]["repos"] == ["o/a"]            # o/x dropped (not selected)
+        assert out[0]["recipients"] == ["a@x.com"]
+        assert out[0]["slug"] == "front"
+        assert out[0]["implicit"] is False
+
+    def test_group_with_no_selected_repos_is_dropped_then_implicit_fallback(self):
+        out = resolve_groups([{"name": "Dead", "repos": ["o/gone"], "recipients": []}], self.REPOS)
+        assert len(out) == 1
+        assert out[0]["implicit"] is True            # no surviving group -> default-all over selected
+        assert sorted(out[0]["repos"]) == ["o/a", "o/b", "o/c"]
+        assert out[0]["recipients"] == []            # owner only
+
+    def test_empty_groups_fall_back_to_one_implicit_group_over_all_selected(self):
+        out = resolve_groups([], self.REPOS)
+        assert len(out) == 1
+        assert out[0]["implicit"] is True
+        assert out[0]["slug"] == "group-1"
+        assert sorted(out[0]["repos"]) == ["o/a", "o/b", "o/c"]
+
+    def test_no_repos_at_all_yields_no_groups(self):
+        assert resolve_groups([], []) == []
+
+    def test_duplicate_names_get_unique_slugs(self):
+        groups = [{"name": "Team", "repos": ["o/a"], "recipients": []},
+                  {"name": "Team", "repos": ["o/b"], "recipients": []}]
+        out = resolve_groups(groups, self.REPOS)
+        assert [g["slug"] for g in out] == ["team", "team-2"]
+
+    def test_string_repo_list_supported(self):
+        out = resolve_groups([], ["o/a", "o/b"])
+        assert sorted(out[0]["repos"]) == ["o/a", "o/b"]
+
+
+class TestCleanEmailList:
+    def test_validates_and_dedupes_preserving_order(self):
+        assert clean_email_list(["a@x.com", "bad", "a@x.com", "b@y.com"]) == ["a@x.com", "b@y.com"]
+
+    def test_empty_and_none(self):
+        assert clean_email_list([]) == []
+        assert clean_email_list(None) == []
+
+
+class TestGroupAlerts:
+    """Partition the reconciled to-alert set into per-group send units, by the finding's repo."""
+
+    def _dep(self, repo, name="x"):
+        return {"category": "dependency", "repo": repo, "name": name, "version": "1",
+                "vuln_id": f"CVE-{name}", "severity": "high", "fixed": "1.1", "impact": "y"}
+
+    def test_single_implicit_group_one_unit_all_findings(self):
+        groups = resolve_groups([], [{"id": "o/a"}, {"id": "o/b"}])      # default-all
+        units = group_alerts([self._dep("o/a"), self._dep("o/b")], groups)
+        assert len(units) == 1
+        assert len(units[0]["findings"]) == 2
+        assert units[0]["recipients"] == []
+
+    def test_explicit_groups_split_by_repo_with_recipients(self):
+        groups = resolve_groups([
+            {"name": "Front", "repos": ["o/a"], "recipients": ["a@x.com"]},
+            {"name": "Back", "repos": ["o/b"], "recipients": ["b@x.com"]},
+        ], [{"id": "o/a"}, {"id": "o/b"}])
+        units = group_alerts([self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")], groups)
+        by_slug = {u["slug"]: u for u in units}
+        assert by_slug["front"]["recipients"] == ["a@x.com"]
+        assert by_slug["front"]["findings"][0]["repo"] == "o/a"
+        assert by_slug["back"]["recipients"] == ["b@x.com"]
+        assert by_slug["back"]["findings"][0]["repo"] == "o/b"
+
+    def test_group_with_no_findings_produces_no_unit(self):
+        groups = resolve_groups([
+            {"name": "Front", "repos": ["o/a"], "recipients": ["a@x.com"]},
+            {"name": "Back", "repos": ["o/b"], "recipients": ["b@x.com"]},
+        ], [{"id": "o/a"}, {"id": "o/b"}])
+        units = group_alerts([self._dep("o/a")], groups)               # only o/a has a finding
+        assert len(units) == 1
+        assert units[0]["slug"] == "front"
+
+    def test_ungrouped_repo_goes_to_owner_only_catch_all_last(self):
+        groups = resolve_groups([{"name": "Front", "repos": ["o/a"], "recipients": ["a@x.com"]}],
+                                [{"id": "o/a"}, {"id": "o/b"}])         # o/b in no group
+        units = group_alerts([self._dep("o/a"), self._dep("o/b", "pkgB")], groups)
+        assert units[-1]["slug"] == "ungrouped"                        # catch-all rendered last
+        catch = units[-1]
+        assert catch["recipients"] == []                               # owner only, no extra CC
+        assert catch["findings"][0]["repo"] == "o/b"
+
+    def test_no_findings_no_units(self):
+        assert group_alerts([], resolve_groups([], [{"id": "o/a"}])) == []
+
+
+class TestGroupedDelivery:
+    """Driver-level: with a configured security_groups, the to-alert set fans out into one email per
+    group (group recipients + global security_recipients CC'd), the code cap is per group, and a repo
+    in no group still alerts the owner. With no groups configured, behaviour is the old single email."""
+
+    def _run(self, monkeypatch, fetch_map):
+        import runpy, waveassist
+        stored, sent = {}, []
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data",
+                            lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(waveassist, "send_email", lambda **k: sent.append(k) or True)
+        monkeypatch.setattr(waveassist, "is_test_run", lambda: False)
+        runpy.run_path("triage_and_alert.py", run_name="__main__")
+        return stored, sent
+
+    def _dep(self, repo, name):
+        return {"category": "dependency", "repo": repo, "name": name, "version": "1",
+                "vuln_id": f"CVE-{name}", "severity": "high", "fixed": "1.1", "impact": "y"}
+
+    def _code(self, repo, i):
+        return {"category": "authz", "repo": repo, "dedup_key": f"authz:/r{i}",
+                "title": f"bug {i}", "severity": "high", "impact": "x", "entry_point": f"/r{i}"}
+
+    def test_explicit_groups_send_separate_emails_to_their_recipients(self, monkeypatch):
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]},
+                  {"name": "Back", "repos": ["o/b"], "recipients": ["back@acme.com"]}]
+        cand = [self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups})
+        assert len(sent) == 2
+        ccs = {tuple(s["cc"] or ()): s for s in sent}
+        assert ("front@acme.com",) in ccs and ("back@acme.com",) in ccs
+        assert "pkgA" in ccs[("front@acme.com",)]["html_content"]
+        assert "pkgB" not in ccs[("front@acme.com",)]["html_content"]   # each group sees only its repos
+
+    def test_global_recipients_cc_on_every_group(self, monkeypatch):
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]}]
+        cand = [self._dep("o/a", "pkgA")]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}],
+            "security_groups": groups, "security_recipients": "soc@acme.com"})
+        assert len(sent) == 1
+        assert sent[0]["cc"] == ["front@acme.com", "soc@acme.com"]      # group + global, de-duped
+
+    def test_ungrouped_repo_alerts_owner_only(self, monkeypatch):
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]}]
+        cand = [self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")]   # o/b in no group
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups})
+        assert len(sent) == 2
+        owner_only = [s for s in sent if not s["cc"]]
+        assert len(owner_only) == 1                                    # catch-all, owner only
+        assert "pkgB" in owner_only[0]["html_content"]
+        assert "pkgA" not in owner_only[0]["html_content"]
+
+    def test_no_groups_configured_single_email_like_before(self, monkeypatch):
+        cand = [self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_recipients": "lead@acme.com"})
+        assert len(sent) == 1                                          # one consolidated email
+        assert sent[0]["cc"] == ["lead@acme.com"]
+        body = sent[0]["html_content"]
+        assert "pkgA" in body and "pkgB" in body
+
+    def test_code_cap_is_per_group(self, monkeypatch):
+        cand = [self._code("o/a", i) for i in range(6)] + [self._code("o/b", i) for i in range(6)]
+        groups = [{"name": "A", "repos": ["o/a"], "recipients": ["a@x.com"]},
+                  {"name": "B", "repos": ["o/b"], "recipients": ["b@x.com"]}]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups})
+        assert len(sent) == 2
+        red = "border-left:4px solid #b91c1c"                          # one per rendered code block
+        per_email = [s["html_content"].count(red) for s in sent]
+        assert all(c <= MAX_CODE_ALERTS for c in per_email)            # cap applies per group
+        assert sum(per_email) > MAX_CODE_ALERTS                        # more shown than a single global cap
