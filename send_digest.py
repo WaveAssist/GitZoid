@@ -77,6 +77,20 @@ def digest_status(sent, attempted):
     return "success" if sent == attempted else "email_failed"
 
 
+def render_group_preview(group_name, recipients, sent, body_html):
+    """One labelled section for the dashboard run-output preview, so a run with N groups shows ALL N
+    (not just the last one processed). The owner is always the primary recipient; `recipients` are the
+    CC'd group members. Purely presentational — the emails themselves are unchanged."""
+    who = ", ".join(recipients) if recipients else "owner only"
+    status = "sent" if sent else "not sent"
+    header = (f"<div style=\"font-family:Inter,-apple-system,sans-serif;margin:18px 0 6px;"
+              f"padding:8px 12px;background:#f1f5f9;border-left:4px solid #1ED66C;border-radius:6px\">"
+              f"<b>{_esc(group_name)}</b>"
+              f"<span style=\"color:#6b7280;font-size:12px\"> &nbsp;|&nbsp; CC: {_esc(who)}"
+              f" &nbsp;|&nbsp; {status}</span></div>")
+    return header + (body_html or "")
+
+
 def render_security_rollup_html(rollup) -> str:
     """The 'we watched, here is the state' section. Always rendered, even at zero (that IS the value)."""
     rollup = rollup or {}
@@ -267,7 +281,7 @@ if not skip:
     now_iso = datetime.now(timezone.utc).isoformat()
 
     sent, results = 0, []
-    last_html = ""
+    preview_blocks = []
     for group in groups:
         slug = group.get("slug")
         name = group.get("name") or "your repositories"
@@ -279,12 +293,14 @@ if not skip:
             print(f"⚠️ {slug}: report generation failed upstream; skipping send (no broken email)")
             results.append({"group": name, "sent": False, "skipped": True,
                             "reason": "generation_failed", "pdf": None, "pdf_error": None})
+            preview_blocks.append(render_group_preview(
+                name, clean_recipients(group.get("recipients")), False,
+                "<p style='color:#8a6d3b;padding:0 12px'>Report generation failed upstream — not sent.</p>"))
             continue
 
         stats = compute_stats(activity, group.get("repos") or [])
         html = build_email_html(name, business_report, technical_report, stats, date_range,
                                 implicit=group.get("implicit"))
-        last_html = html
         pdf_file, pdf_name, pdf_error = generate_pdf(html, name)
         cc = clean_recipients(group.get("recipients"))
         try:
@@ -303,13 +319,14 @@ if not skip:
             state["last_sent_at"] = now_iso
             digest_state[slug] = state
         results.append({"group": name, "sent": bool(ok), "pdf": pdf_name, "pdf_error": pdf_error})
+        preview_blocks.append(render_group_preview(name, cc, ok, html))
         print(f"{'✓' if ok else '⚠️'} {slug}: digest {'sent' if ok else 'send failed'}")
 
     waveassist.store_data("digest_state", digest_state, data_type="json")
     attempted = len([r for r in results if not r.get("skipped")])
     waveassist.store_data("display_output", {
         "title": f"GitZoid Digest: {sent} email(s) sent",
-        "html_content": last_html or "<p>No groups to send.</p>",
+        "html_content": "".join(preview_blocks) or "<p>No groups to send.</p>",
         "attempted": attempted,
         "status": digest_status(sent, attempted),
         "groups": results,

@@ -237,6 +237,32 @@ class TestDriver:
         assert stored.get("digest_run_lock") == {}        # lock released
         assert "front" in stored.get("digest_state", {})  # last_sent_at recorded
 
+    def test_display_output_shows_every_group_not_just_last(self, monkeypatch):
+        # Regression: the run-output preview must render ALL groups, not only the last one processed.
+        groups = [
+            {"name": "Front", "repos": ["o/a"], "recipients": ["lead@acme.com"], "slug": "front"},
+            {"name": "Mobile", "repos": ["o/b"], "recipients": [], "slug": "mobile"},
+        ]
+        fetch_map = {
+            "digest_skip_run": "0",
+            "digest_run_lock_token": "TKN",
+            "digest_run_lock": {"at": "now", "token": "TKN"},
+            "digest_resolved_groups": groups,
+            "digest_business_reports": {"front": {"executive_summary": "ALPHASUMMARY", "shipped_features": []},
+                                        "mobile": {"executive_summary": "BETASUMMARY", "shipped_features": []}},
+            "digest_technical_reports": {"front": {"repository_deep_dive": [], "poem": ["a"], "security_rollup": ROLLUP},
+                                         "mobile": {"repository_deep_dive": [], "poem": ["b"], "security_rollup": ROLLUP}},
+            "github_activity_data": {"o/a": {"commits": [{"author": "x"}]}, "o/b": {"commits": []}},
+            "report_date_range": {},
+            "digest_state": {},
+        }
+        stored, emails = self._run(monkeypatch, fetch_map)
+        out = stored.get("display_output", {})
+        body = out.get("html_content", "")
+        assert "ALPHASUMMARY" in body and "BETASUMMARY" in body   # BOTH groups' bodies present
+        assert "Front" in body and "Mobile" in body               # both labelled
+        assert out["title"] == "GitZoid Digest: 2 email(s) sent"
+
     def test_failed_group_not_sent(self, monkeypatch):
         """A group whose LLM raised (generation_failed) is skipped: no email, state untouched. A clean
         sibling group still sends, and the lock is still released."""
