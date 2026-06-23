@@ -182,6 +182,8 @@ variables:
         key: "6"
 
   # Extra recipients CC'd on security alerts. The account owner always receives them. Comma separated.
+  # With security_groups configured these are CC'd on EVERY group's alert (the org-wide security distro);
+  # each group's own recipients are added on top.
   - name: security_recipients
     key: security_recipients
     display_name: Security alert recipients (CC)
@@ -189,6 +191,23 @@ variables:
     is_optional: true
     default_value: ""
     helper_message: "Additional emails to CC on security alerts, comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them."
+
+  # Project groups for SECURITY alerts. Each group is {name, repos[], recipients[]} and routes that
+  # group's alerts to its own recipients (owner always primary; security_recipients CC'd on every group).
+  # Mirrors digest_groups but is a SEPARATE list, because the security audience (engineers / security
+  # leads) usually differs from the digest audience (leadership). Grouping is delivery-only: scanning and
+  # the dedup ledger stay global (reconcile once, split at send), so the code-finding cap becomes per
+  # group. Empty/unset -> ONE implicit group over all selected repos (owner only), so alerts ship with
+  # zero dashboard setup. A repo left out of every group still alerts the OWNER (never silently dropped).
+  # Stored as a JSON string (data_type "list").
+  - name: security_groups
+    key: security_groups
+    display_name: "Security alert groups"
+    type: repo_groups
+    is_optional: true
+    depends_on: github
+    default_value: "[]"
+    helper_message: "Group your repos to route security alerts to different people; each group gets its own alert email with its own recipients. Leave empty to send one alert covering all repos to the owner."
 
   # Knowledge Digest toggle. Config default is "true" so a NEW user's setup wizard stores "true" and the
   # digest is ON for them. EXISTING users never stored this key, so the node treats unset as OFF (no surprise

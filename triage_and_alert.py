@@ -16,6 +16,7 @@ Conventions: flat script, no __main__ guard, init() first, no sibling imports (l
 finding_sig are duplicated by design), fall-through on empty.
 """
 import re
+import json
 import html
 import hashlib
 from datetime import datetime, timezone
@@ -371,6 +372,124 @@ def parse_recipients(value):
     return [p for p in parts if "@" in p and "." in p.split("@")[-1]]
 
 
+# ---------------------------------------------------------------- group routing (per-group delivery)
+# A separate `security_groups` config var (mirrors the digest's digest_groups) lets alerts for
+# different repos go to different people. Grouping is purely a DELIVERY-time partition: the scan
+# pipeline and the persistent `security_findings` ledger stay GLOBAL (reconcile once above, split at
+# send), so dedup / escalation / resolved logic is untouched. resolve_groups / parse_groups / slugify
+# are duplicated from digest_check_and_init by the same no-sibling-imports convention as the lock
+# helpers above.
+
+def parse_groups(raw):
+    """The security_groups input is stored by the dashboard as a JSON string; fetch may return it
+    already-parsed or as a string. Normalize to a list; anything malformed -> []."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def slugify(name, index) -> str:
+    """Stable kebab-case identity for a group. Empty name -> group-{1-based index}."""
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return s or f"group-{index + 1}"
+
+
+def _selected_ids(repositories):
+    out = []
+    for r in (repositories or []):
+        rid = r.get("id") if isinstance(r, dict) else r
+        if rid:
+            out.append(rid)
+    return out
+
+
+def resolve_groups(security_groups, repositories):
+    """Normalize the security_groups input into this run's delivery map. Each configured group's
+    repos are intersected with the globally-selected set (a repo deselected globally drops out);
+    groups left with no selected repo are dropped. If no non-empty group survives, fall back to ONE
+    implicit group over ALL selected repos (recipients empty -> owner only) — the 'default all'.
+    Slugs are unique and stable. Returns [{name, repos, recipients, slug, implicit}]."""
+    selected = _selected_ids(repositories)
+    selected_set = set(selected)
+
+    groups = []
+    for g in (security_groups or []):
+        if not isinstance(g, dict):
+            continue
+        repos = [p for p in (g.get("repos") or []) if p in selected_set]
+        if not repos:
+            continue
+        groups.append({"name": (g.get("name") or "").strip(),
+                       "repos": repos,
+                       "recipients": [e for e in (g.get("recipients") or []) if e],
+                       "implicit": False})
+
+    if not groups and selected:
+        groups = [{"name": "", "repos": selected, "recipients": [], "implicit": True}]
+
+    seen, out = set(), []
+    for i, g in enumerate(groups):
+        base = slugify(g["name"], i)
+        slug, n = base, 2
+        while slug in seen:
+            slug = f"{base}-{n}"
+            n += 1
+        seen.add(slug)
+        g["slug"] = slug
+        out.append(g)
+    return out
+
+
+def clean_email_list(values):
+    """Validate + de-dupe an email list, preserving order. The owner is always the primary recipient
+    (added by the SDK); these are CC'd on top."""
+    out = []
+    for e in (values or []):
+        e = str(e).strip()
+        if "@" in e and "." in e.split("@")[-1] and e not in out:
+            out.append(e)
+    return out
+
+
+def group_alerts(to_alert, groups):
+    """Partition the reconciled to-alert findings into per-group send units, by the finding's repo.
+    Each explicit group with at least one finding becomes one unit (its recipients CC'd; the owner is
+    always primary). A finding whose repo is in no group collects into ONE owner-only catch-all unit,
+    so a security finding is NEVER silently dropped because its repo was left out of every group.
+    Groups with no findings this run produce no unit (no empty emails). The code-section cap is
+    applied later, per unit, so it becomes per-group. Returns
+    [{slug, recipients, repo_count, findings}] with the catch-all (if any) last."""
+    repo_to_group = {}
+    for g in (groups or []):
+        for r in (g.get("repos") or []):
+            repo_to_group.setdefault(r, g)        # first group wins (membership is exclusive anyway)
+    units, by_slug, ungrouped = [], {}, []
+    for f in (to_alert or []):
+        g = repo_to_group.get(f.get("repo"))
+        if g is None:
+            ungrouped.append(f)
+            continue
+        slug = g.get("slug")
+        unit = by_slug.get(slug)
+        if unit is None:
+            unit = {"slug": slug, "recipients": list(g.get("recipients") or []),
+                    "repo_count": len(g.get("repos") or []), "findings": []}
+            by_slug[slug] = unit
+            units.append(unit)
+        unit["findings"].append(f)
+    if ungrouped:
+        repos = {f.get("repo") for f in ungrouped if f.get("repo")}
+        units.append({"slug": "ungrouped", "recipients": [],
+                      "repo_count": len(repos), "findings": ungrouped})
+    return units
+
+
 def release_run_lock():
     """Release the security lock only if THIS run owns it (token match)."""
     my_token = waveassist.fetch_data("security_run_lock_token", run_based=True, default="") or ""
@@ -407,23 +526,57 @@ if not skip:
         preview = False
 
     if to_alert:
-        ranked = rank_findings(to_alert)
-        code, deps = split_findings(ranked)
-        kept_code = cap_code_findings(code)          # cap code section, keep KEV; deps listed in full
-        displayed = rank_findings(kept_code + deps)  # exactly what the email body shows
-        subject = build_subject(displayed)           # subject + count agree with the rendered body
-        email_html = build_alert_email(kept_code, deps, scanned_repos)
-        # Owner is always the primary recipient (SDK); configured extras are CC'd.
-        cc = parse_recipients(waveassist.fetch_data("security_recipients", default="") or "")
-        if not preview:
-            try:
-                waveassist.send_email(subject=subject, html_content=email_html,
-                                      cc=cc or None, raise_on_failure=False)
-            except Exception as e:
-                print(f"⚠️ security alert email failed: {e}")
-        waveassist.store_data("display_output", {"html_content": email_html},
+        # Grouping is a delivery-time split ONLY: the ledger was reconciled once globally above; here
+        # we fan the to-alert set out per group (resolve_groups applies the implicit 'default all'
+        # fallback) so different repos route to different people. The code cap is applied per unit
+        # below, so it is per-group; a repo in no group still alerts the owner via the catch-all unit.
+        groups = resolve_groups(parse_groups(waveassist.fetch_data("security_groups", default=[])),
+                                repositories)
+        units = group_alerts(to_alert, groups)
+        # Global extras are CC'd on EVERY group email (the org-wide security distro); each group's own
+        # recipients are added on top. The owner is always the primary recipient (SDK).
+        global_cc = parse_recipients(waveassist.fetch_data("security_recipients", default="") or "")
+
+        sent_count, total_issues, last_html, results = 0, 0, "", []
+        for unit in units:
+            ranked = rank_findings(unit["findings"])
+            code, deps = split_findings(ranked)
+            kept_code = cap_code_findings(code)          # per unit -> per-group cap; deps in full
+            displayed = rank_findings(kept_code + deps)  # exactly what THIS group's email shows
+            subject = build_subject(displayed)           # subject + count agree with the body
+            email_html = build_alert_email(kept_code, deps, unit["repo_count"])
+            cc = clean_email_list(list(unit["recipients"]) + global_cc)
+            last_html = email_html
+            n = _issue_count(displayed)
+            total_issues += n
+            # A preview/test run builds the email but sends nothing — so `sent` must reflect real
+            # delivery only, never a previewed unit. `previewed` records that the unit was prepared.
+            delivered = False
+            if not preview:
+                try:
+                    delivered = bool(waveassist.send_email(subject=subject, html_content=email_html,
+                                                           cc=cc or None, raise_on_failure=False))
+                except Exception as e:
+                    print(f"⚠️ security alert email failed for {unit['slug']}: {e}")
+                    delivered = False
+            if delivered:
+                sent_count += 1
+            results.append({"group": unit["slug"], "issues": n,
+                            "sent": delivered, "previewed": preview})
+
+        title = (f"GitZoid Security (preview): {len(units)} group email(s) prepared"
+                 if preview else
+                 f"GitZoid Security: {sent_count} alert email(s) sent across {len(units)} group(s)")
+        waveassist.store_data("display_output",
+                              {"title": title, "html_content": last_html, "groups": results,
+                               "sent": sent_count, "preview": preview},
                               run_based=True, data_type="json")
-        print(f"GitZoid Security: alerted {_issue_count(displayed)} issue(s); {len(resolved)} resolved.")
+        if preview:
+            print(f"GitZoid Security (preview): prepared {len(units)} group email(s), "
+                  f"{total_issues} issue(s); nothing sent.")
+        else:
+            print(f"GitZoid Security: alerted {total_issues} issue(s) across {len(units)} group(s); "
+                  f"{sent_count} email(s) sent; {len(resolved)} resolved.")
     else:
         msg = (f"<p>GitZoid scanned {scanned_repos} repo(s) — nothing new to report. "
                f"{len(resolved)} issue(s) resolved since last time.</p>")
