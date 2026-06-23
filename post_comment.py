@@ -213,10 +213,15 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short, current_
         lines += [f"- {s}" for s in free_sugg[:5]]
         lines.append("\n</details>")
         lines.append("")
-    # Resolved findings live in their own collapsed section (clean, not struck through inline).
-    if fixed_all:
-        lines.append(f"<details><summary>✅ Resolved ({len(fixed_all)})</summary>\n")
+    # Resolved findings + addressed optimizations/suggestions live in their own collapsed section
+    # (clean, not struck through inline). Addressed optimizations are a one-time "you fixed it"
+    # acknowledgement reported by the incremental review (they are not ledger-tracked).
+    addressed_opts = [str(o) for o in (review.get("addressed_optimizations") or []) if o]
+    if fixed_all or addressed_opts:
+        n_resolved = len(fixed_all) + len(addressed_opts)
+        lines.append(f"<details><summary>✅ Resolved ({n_resolved})</summary>\n")
         lines += [_finding_row(v, resolved=True) for v in fixed_all[:30]]
+        lines += [f"- {o}" for o in addressed_opts[:10]]
         lines.append("\n</details>")
         lines.append("")
     # No "Changed files" list: GitHub's own Files-changed tab is authoritative, each finding already
@@ -417,6 +422,12 @@ def run_driver():
                 waveassist.store_data("pull_requests", [], data_type="json")
             waveassist.store_data("display_output", {"html_content": display}, run_based=True, data_type="json")
             print(f"✅ post_comment done (preview={preview}, posted={len(posted_links)}).")
+            if not preview and not posted_links:
+                waveassist.mark_run_idle()   # nothing actually posted this cycle → idle
+                                             # (preview never posts, so it is NOT idle here)
+        else:
+            # No generated-but-unposted PRs this cycle (no new PRs, or a skipped cycle) → idle.
+            waveassist.mark_run_idle()
     finally:
         release_run_lock()
 

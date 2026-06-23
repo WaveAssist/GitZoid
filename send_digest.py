@@ -315,7 +315,10 @@ if not skip:
         "groups": results,
     }, run_based=True, data_type="json")
     print(f"GitZoid Digest: sent {sent}/{len(results)} group digest(s).")
+    if sent == 0:
+        waveassist.mark_run_idle()      # no digest delivered this run → idle
 else:
     print("GitZoid Digest: digest_skip_run set; send_digest no-op.")
+    waveassist.mark_run_idle()          # skipped cycle (off-week, disabled, or overlapping run)
 
 release_run_lock()

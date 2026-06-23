@@ -124,6 +124,10 @@ class UpdateReviewResult(BaseModel):
         description="ALL concerns present in the current code. Re-state a still-present prior finding using the SAME wording as before so it is recognized as the same issue.")
     addressed_issues: List[str] = Field(default_factory=list,
         description="Prior findings that are now genuinely fixed in the current code.")
+    addressed_optimizations: List[str] = Field(default_factory=list,
+        description="Prior-review optimizations or suggestions that are now genuinely addressed in the "
+                    "current code. Re-state the prior wording so the developer recognizes it. This is "
+                    "the one-time 'you fixed it' acknowledgement; it is NOT carried forward.")
     potential_optimizations: List[str] = Field(default_factory=list)
     suggestions: List[str] = Field(default_factory=list)
 
@@ -320,6 +324,7 @@ def get_update_review_prompt(review_pr, previous_review=None, max_input_tokens=2
     This PR was reviewed before; new commits have landed. Review the FULL current code shown above and report its CURRENT state:
     - findings[]: EVERY concern present in the code as it stands now. For any prior-review issue that is STILL present, re-state it with the SAME wording as before so it is recognized as the same issue (do not reword unchanged issues). Include genuinely new concerns too.
     - addressed_issues[]: prior-review issues that are now actually fixed in the current code.
+    - addressed_optimizations[]: prior-review optimizations/suggestions that are now addressed in the current code, so the developer sees them confirmed fixed instead of silently vanishing. Only ones that were raised before and are now genuinely handled.
     - summary[]: 1-2 plain sentences on what the PR does now.
     - potential_optimizations[], suggestions[]. Apply the security sweep.
     Decide 'fixed vs still-present' from the current code, never from which file the latest commit happened to touch.

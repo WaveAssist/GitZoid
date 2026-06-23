@@ -17,6 +17,7 @@ nodes:
     name: CheckCreditsAndInit
     file_name: check_credits_and_init.py
     starting_node: true
+    chain_label: "PR Review"          # dashboard label for this chain's runs
     schedule:
       interval:
         every: 2
@@ -55,6 +56,7 @@ nodes:
     name: SecurityCheckAndInit
     file_name: security_check_and_init.py
     starting_node: true
+    chain_label: "Security Watch"      # dashboard label for this chain's runs
     schedule:
       cron: "0 6 * * *"   # daily at 06:00 UTC
       timezone: "UTC"
@@ -89,6 +91,7 @@ nodes:
     name: DigestCheckAndInit
     file_name: digest_check_and_init.py
     starting_node: true
+    chain_label: "Knowledge Digest"    # dashboard label for this chain's runs
     schedule:
       cron: "30 8 * * 1"   # weekly, Monday 08:30 UTC
       timezone: "UTC"

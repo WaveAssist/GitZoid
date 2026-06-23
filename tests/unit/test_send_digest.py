@@ -177,6 +177,29 @@ class TestDriver:
         stored, emails = self._run(monkeypatch, fetch_map)
         assert emails == []                              # no email on skip
         assert stored.get("digest_run_lock") == {}       # but the owned lock is freed
+        assert stored.get("run_idle") == "1"             # skipped cycle → idle
+
+    def test_no_groups_sent_marks_idle(self, monkeypatch):
+        # digest enabled this cycle but no groups resolved -> 0 sent -> idle
+        stored, emails = self._run(monkeypatch, {
+            "digest_skip_run": "0", "digest_run_lock_token": "TKN",
+            "digest_run_lock": {"at": "now", "token": "TKN"},
+            "digest_resolved_groups": [], "digest_state": {}})
+        assert emails == []
+        assert stored.get("run_idle") == "1"
+
+    def test_sent_digest_not_marked_idle(self, monkeypatch):
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": [], "slug": "front"}]
+        stored, emails = self._run(monkeypatch, {
+            "digest_skip_run": "0", "digest_run_lock_token": "TKN",
+            "digest_run_lock": {"at": "now", "token": "TKN"},
+            "digest_resolved_groups": groups,
+            "digest_business_reports": {"front": {"executive_summary": "s", "shipped_features": []}},
+            "digest_technical_reports": {"front": {"repository_deep_dive": [], "poem": ["a"], "security_rollup": ROLLUP}},
+            "github_activity_data": {"o/a": {"commits": [{"author": "x"}]}},
+            "report_date_range": {}, "digest_state": {}})
+        assert len(emails) == 1
+        assert "run_idle" not in stored                  # a digest went out → acted
 
     def test_skip_does_not_free_someone_elses_lock(self, monkeypatch):
         fetch_map = {

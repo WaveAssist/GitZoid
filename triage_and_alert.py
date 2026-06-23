@@ -429,5 +429,8 @@ if not skip:
                f"{len(resolved)} issue(s) resolved since last time.</p>")
         waveassist.store_data("display_output", {"html_content": msg}, run_based=True, data_type="json")
         print(f"GitZoid Security: silent (no new findings); {len(resolved)} resolved.")
+        waveassist.mark_run_idle()      # scanned, nothing new to alert → idle
+else:
+    waveassist.mark_run_idle()          # skipped cycle (another security run in progress)
 
 release_run_lock()

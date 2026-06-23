@@ -248,6 +248,21 @@ class TestDriver:
             "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
         assert sent == []                                # silence is the all-clear
         assert "display_output" in stored               # but the run still reports it scanned
+        assert stored.get("run_idle") == "1"            # silent scan → marked idle
+
+    def test_alerted_run_not_marked_idle(self, monkeypatch):
+        cand = [{"category": "dependency", "repo": "o/r", "name": "x", "version": "1",
+                 "vuln_id": "CVE-9", "severity": "high", "fixed": "1.1", "impact": "y",
+                 "actively_exploited": True}]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand,
+            "security_findings": {}, "github_selected_resources": [{"id": "o/r"}]})
+        assert len(sent) == 1
+        assert "run_idle" not in stored                 # an alert went out → acted, not idle
+
+    def test_skip_run_marked_idle(self, monkeypatch):
+        stored, sent = self._run(monkeypatch, {"security_skip_run": "1"})
+        assert stored.get("run_idle") == "1"            # skipped cycle → idle
 
 
 class TestReconcileScannedOk:

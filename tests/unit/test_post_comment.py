@@ -128,6 +128,24 @@ class TestBuildSummaryMd:
         assert "✅ Resolved (1)" in md                     # resolved in its dropdown
         assert "- `b.py:2` — fixed bug" in md             # clean resolved row
 
+    def test_addressed_optimizations_show_as_resolved(self):
+        # An optimization the developer fixed in a follow-up commit is acknowledged in Resolved,
+        # not silently dropped — boosts the see-it/fix-it/confirmed loop.
+        review = {"verdict": "looks_good", "summary": ["does X"],
+                  "addressed_optimizations": ["collapse the N+1 query into one prefetch"]}
+        md = build_summary_md(review, {}, ["a.py"], "newsha1", current_sha="newsha", is_update=True)
+        assert "✅ Resolved (1)" in md
+        assert "collapse the N+1 query into one prefetch" in md
+
+    def test_resolved_count_combines_findings_and_optimizations(self):
+        ledger = {"f1": {"path": "b.py", "line": 2, "body": "fixed bug", "category": "bug", "status": "fixed"}}
+        review = {"verdict": "needs_changes", "summary": ["x"],
+                  "addressed_optimizations": ["batched the writes"]}
+        md = build_summary_md(review, ledger, ["a.py"], "s", current_sha="s", is_update=True)
+        assert "✅ Resolved (2)" in md                     # 1 fixed finding + 1 addressed optimization
+        assert "- `b.py:2` — fixed bug" in md
+        assert "- batched the writes" in md
+
 
 class TestReconcileLedger:
     def test_new_bug_open_and_inline(self):
@@ -404,6 +422,40 @@ class TestDriverRobustness:
 
         assert prs[1].get("comment_posted") is True          # good PR processed despite the bad one
         assert store.get("run_lock") == {}                   # lock released in finally
+
+    def test_no_prs_to_post_marks_idle(self):
+        wa, store = self._wa([], preview=False)          # nothing generated-but-unposted
+        with patch.object(post_comment, "waveassist", wa):
+            run_driver()
+        assert wa.mark_run_idle.called                   # no new PRs this cycle → idle
+        assert store.get("run_lock") == {}               # lock still released
+
+    def test_preview_with_pr_not_marked_idle(self):
+        # Preview never posts (url=None), so posted_links is empty — but a preview that HAS a PR to
+        # review is not idle (regression guard for the preview-false-idle bug).
+        prs = [{"id": "o/x", "pr_number": 1, "comment_generated": True, "review_dict": {"findings": []}}]
+        wa, store = self._wa(prs, preview=True)
+
+        def fake_process(pr, *a, **k):
+            return False, None, "<preview block>"   # preview: rendered a block, posted nothing
+
+        with patch.object(post_comment, "waveassist", wa), \
+             patch.object(post_comment, "process_one_pr", side_effect=fake_process):
+            run_driver()
+        assert not wa.mark_run_idle.called               # preview with a PR → not idle
+
+    def test_posted_review_not_marked_idle(self):
+        prs = [{"id": "o/x", "pr_number": 1, "comment_generated": True, "review_dict": {"findings": []}}]
+        wa, store = self._wa(prs, preview=False)
+
+        def fake_process(pr, *a, **k):
+            pr["comment_posted"] = True
+            return True, "http://x", "<b>"
+
+        with patch.object(post_comment, "waveassist", wa), \
+             patch.object(post_comment, "process_one_pr", side_effect=fake_process):
+            run_driver()
+        assert not wa.mark_run_idle.called               # a review was posted → acted
 
     def test_lock_released_even_when_cleanup_raises(self):
         prs = [{"id": "o/x", "pr_number": 1, "comment_generated": True, "review_dict": {"findings": []}}]
