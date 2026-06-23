@@ -549,23 +549,34 @@ if not skip:
             last_html = email_html
             n = _issue_count(displayed)
             total_issues += n
-            ok = True
+            # A preview/test run builds the email but sends nothing — so `sent` must reflect real
+            # delivery only, never a previewed unit. `previewed` records that the unit was prepared.
+            delivered = False
             if not preview:
                 try:
-                    ok = waveassist.send_email(subject=subject, html_content=email_html,
-                                               cc=cc or None, raise_on_failure=False)
+                    delivered = bool(waveassist.send_email(subject=subject, html_content=email_html,
+                                                           cc=cc or None, raise_on_failure=False))
                 except Exception as e:
                     print(f"⚠️ security alert email failed for {unit['slug']}: {e}")
-                    ok = False
-            if ok:
+                    delivered = False
+            if delivered:
                 sent_count += 1
-            results.append({"group": unit["slug"], "sent": bool(ok), "issues": n})
+            results.append({"group": unit["slug"], "issues": n,
+                            "sent": delivered, "previewed": preview})
 
+        title = (f"GitZoid Security (preview): {len(units)} group email(s) prepared"
+                 if preview else
+                 f"GitZoid Security: {sent_count} alert email(s) sent across {len(units)} group(s)")
         waveassist.store_data("display_output",
-                              {"html_content": last_html, "groups": results, "sent": sent_count},
+                              {"title": title, "html_content": last_html, "groups": results,
+                               "sent": sent_count, "preview": preview},
                               run_based=True, data_type="json")
-        print(f"GitZoid Security: alerted {total_issues} issue(s) across {len(units)} group(s); "
-              f"{sent_count} email(s) sent; {len(resolved)} resolved.")
+        if preview:
+            print(f"GitZoid Security (preview): prepared {len(units)} group email(s), "
+                  f"{total_issues} issue(s); nothing sent.")
+        else:
+            print(f"GitZoid Security: alerted {total_issues} issue(s) across {len(units)} group(s); "
+                  f"{sent_count} email(s) sent; {len(resolved)} resolved.")
     else:
         msg = (f"<p>GitZoid scanned {scanned_repos} repo(s) — nothing new to report. "
                f"{len(resolved)} issue(s) resolved since last time.</p>")

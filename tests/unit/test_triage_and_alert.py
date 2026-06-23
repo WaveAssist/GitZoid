@@ -744,3 +744,40 @@ class TestGroupedDelivery:
         per_email = [s["html_content"].count(red) for s in sent]
         assert all(c <= MAX_CODE_ALERTS for c in per_email)            # cap applies per group
         assert sum(per_email) > MAX_CODE_ALERTS                        # more shown than a single global cap
+
+    def test_display_output_carries_slugs_counts_and_summary_title(self, monkeypatch):
+        # The dashboard summary must convey what was sent across groups: slugs + per-group counts +
+        # total + a one-line title — not just the last group's HTML.
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]},
+                  {"name": "Back", "repos": ["o/b"], "recipients": ["back@acme.com"]}]
+        cand = [self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups})
+        disp = stored["display_output"]
+        assert "Security" in disp.get("title", "")
+        assert {g["group"] for g in disp["groups"]} == {"front", "back"}
+        assert all("issues" in g for g in disp["groups"])
+        assert disp["sent"] == 2
+
+    def test_preview_run_prepares_but_does_not_count_as_sent(self, monkeypatch):
+        # A preview/test run builds the emails but sends nothing; the stored results must not claim
+        # delivery. A `preview` flag (top-level + per group) makes the distinction unambiguous.
+        import runpy, waveassist
+        stored, sent = {}, []
+        fetch_map = {
+            "security_skip_run": "0", "security_candidates": [self._dep("o/a", "pkgA")],
+            "security_findings": {}, "github_selected_resources": [{"id": "o/a"}]}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data",
+                            lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(waveassist, "send_email", lambda **k: sent.append(k) or True)
+        monkeypatch.setattr(waveassist, "is_test_run", lambda: True)        # preview run
+        runpy.run_path("triage_and_alert.py", run_name="__main__")
+        assert sent == []                                                  # nothing actually sent
+        disp = stored["display_output"]
+        assert disp.get("preview") is True
+        assert disp.get("sent") == 0                                       # not counted as sent
+        assert all(g.get("previewed") is True and g.get("sent") is False for g in disp["groups"])
