@@ -600,6 +600,32 @@ class TestResolveGroups:
         out = resolve_groups([], ["o/a", "o/b"])
         assert sorted(out[0]["repos"]) == ["o/a", "o/b"]
 
+    def test_overlapping_repo_assigned_to_first_group_only(self):
+        # Exclusive membership: a repo listed in two groups belongs to the FIRST that claims it; the
+        # second never receives that repo's findings (and never CC's the first group's recipients on it).
+        groups = [{"name": "One", "repos": ["o/a", "o/b"], "recipients": ["one@x.com"]},
+                  {"name": "Two", "repos": ["o/b", "o/c"], "recipients": ["two@x.com"]}]
+        out = resolve_groups(groups, self.REPOS)
+        by_slug = {g["slug"]: g for g in out}
+        assert by_slug["one"]["repos"] == ["o/a", "o/b"]
+        assert by_slug["two"]["repos"] == ["o/c"]            # o/b claimed by "one", dropped here
+
+    def test_group_fully_overlapped_is_dropped(self):
+        groups = [{"name": "One", "repos": ["o/a"], "recipients": ["one@x.com"]},
+                  {"name": "Two", "repos": ["o/a"], "recipients": ["two@x.com"]}]
+        out = resolve_groups(groups, self.REPOS)
+        assert [g["slug"] for g in out] == ["one"]           # "Two" had only the claimed repo -> gone
+
+    def test_implicit_group_carries_global_recipients(self):
+        out = resolve_groups([], self.REPOS, global_recipients=["soc@acme.com"])
+        assert out[0]["implicit"] is True
+        assert out[0]["recipients"] == ["soc@acme.com"]      # global CC is the zero-config group's CC
+
+    def test_explicit_groups_do_not_inherit_global_recipients(self):
+        out = resolve_groups([{"name": "Front", "repos": ["o/a"], "recipients": ["a@x.com"]}],
+                             self.REPOS, global_recipients=["soc@acme.com"])
+        assert out[0]["recipients"] == ["a@x.com"]           # explicit group keeps only its own
+
 
 class TestCleanEmailList:
     def test_validates_and_dedupes_preserving_order(self):
@@ -657,6 +683,17 @@ class TestGroupAlerts:
     def test_no_findings_no_units(self):
         assert group_alerts([], resolve_groups([], [{"id": "o/a"}])) == []
 
+    def test_ungrouped_catch_all_carries_global_recipients(self):
+        groups = resolve_groups([{"name": "Front", "repos": ["o/a"], "recipients": ["a@x.com"]}],
+                                [{"id": "o/a"}, {"id": "o/b"}])
+        units = group_alerts([self._dep("o/a"), self._dep("o/b", "pkgB")], groups,
+                             global_recipients=["soc@acme.com"])
+        catch = units[-1]
+        assert catch["slug"] == "ungrouped"
+        assert catch["recipients"] == ["soc@acme.com"]       # global distro covers unassigned repos
+        # the explicit group is unaffected by the global list
+        assert next(u for u in units if u["slug"] == "front")["recipients"] == ["a@x.com"]
+
 
 class TestGroupedDelivery:
     """Driver-level: with a configured security_groups, the to-alert set fans out into one email per
@@ -697,7 +734,9 @@ class TestGroupedDelivery:
         assert "pkgA" in ccs[("front@acme.com",)]["html_content"]
         assert "pkgB" not in ccs[("front@acme.com",)]["html_content"]   # each group sees only its repos
 
-    def test_global_recipients_cc_on_every_group(self, monkeypatch):
+    def test_global_recipients_not_ccd_on_explicit_groups(self, monkeypatch):
+        # An explicit group CC's ONLY its own recipients; the global security_recipients no longer
+        # leak onto every group (the cross-group CC bug). They cover only ungrouped/implicit delivery.
         groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]}]
         cand = [self._dep("o/a", "pkgA")]
         stored, sent = self._run(monkeypatch, {
@@ -705,7 +744,35 @@ class TestGroupedDelivery:
             "github_selected_resources": [{"id": "o/a"}],
             "security_groups": groups, "security_recipients": "soc@acme.com"})
         assert len(sent) == 1
-        assert sent[0]["cc"] == ["front@acme.com", "soc@acme.com"]      # group + global, de-duped
+        assert sent[0]["cc"] == ["front@acme.com"]                      # group only; soc@acme.com NOT leaked
+
+    def test_global_recipients_cc_on_ungrouped_catch_all(self, monkeypatch):
+        # The global distro covers repos that belong to NO explicit group (the catch-all), but not
+        # the explicit groups themselves.
+        groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]}]
+        cand = [self._dep("o/a", "pkgA"), self._dep("o/b", "pkgB")]     # o/b ungrouped
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups, "security_recipients": "soc@acme.com"})
+        front = [s for s in sent if "pkgA" in s["html_content"]][0]
+        catch = [s for s in sent if "pkgB" in s["html_content"]][0]
+        assert front["cc"] == ["front@acme.com"]                       # explicit group: own recipients only
+        assert catch["cc"] == ["soc@acme.com"]                         # catch-all: global distro
+
+    def test_overlap_does_not_leak_recipients_across_groups(self, monkeypatch):
+        # The reported bug: repo o/b sits in BOTH groups; group "One" (with userX) is first. With
+        # exclusive membership o/b belongs to "One" only, so its finding routes to "One" and there is
+        # never a second email CC'ing userX about o/b as if it were group "Two"'s.
+        groups = [{"name": "One", "repos": ["o/a", "o/b"], "recipients": ["userx@acme.com"]},
+                  {"name": "Two", "repos": ["o/b"], "recipients": []}]
+        cand = [self._dep("o/b", "pkgB")]
+        stored, sent = self._run(monkeypatch, {
+            "security_skip_run": "0", "security_candidates": cand, "security_findings": {},
+            "github_selected_resources": [{"id": "o/a"}, {"id": "o/b"}],
+            "security_groups": groups})
+        assert len(sent) == 1                                          # only "One" owns o/b; "Two" is empty
+        assert sent[0]["cc"] == ["userx@acme.com"]
 
     def test_ungrouped_repo_alerts_owner_only(self, monkeypatch):
         groups = [{"name": "Front", "repos": ["o/a"], "recipients": ["front@acme.com"]}]
