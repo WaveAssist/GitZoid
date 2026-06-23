@@ -192,7 +192,7 @@ variables:
     type: string
     is_optional: true
     default_value: ""
-    helper_message: "Default emails to CC on security alerts for repos not in any group (and on the single alert when no groups are set), comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them. Each configured group CC's its own recipients instead."
+    helper_message: "Extra emails to CC on security alerts, comma separated. The owner always receives them. Groups CC their own recipients."
 
   # Project groups for SECURITY alerts. Each group is {name, repos[], recipients[]} and routes that
   # group's alerts to its OWN recipients only (owner always primary). Repo membership is exclusive: a
@@ -211,7 +211,7 @@ variables:
     is_optional: true
     depends_on: github
     default_value: "[]"
-    helper_message: "Group your repos to route security alerts to different people; each group gets its own alert email with its own recipients. Leave empty to send one alert covering all repos to the owner."
+    helper_message: "Send security alerts for different repos to different people. Each group emails its own recipients. Leave empty to alert the owner about all repos."
 
   # Knowledge Digest toggle. Config default is "true" so a NEW user's setup wizard stores "true" and the
   # digest is ON for them. EXISTING users never stored this key, so the node treats unset as OFF (no surprise
@@ -241,7 +241,7 @@ variables:
     is_optional: true
     depends_on: github
     default_value: "[]"
-    helper_message: "Group your selected repos by project; each group gets its own weekly digest with its own recipients. Leave empty for a single digest covering all selected repos."
+    helper_message: "Send a separate weekly digest per group, each to its own recipients. Leave empty for one digest of all repos."
 
   - name: schedule
     key: schedule
