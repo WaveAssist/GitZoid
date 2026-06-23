@@ -182,24 +182,28 @@ variables:
         key: "6"
 
   # Extra recipients CC'd on security alerts. The account owner always receives them. Comma separated.
-  # With security_groups configured these are CC'd on EVERY group's alert (the org-wide security distro);
-  # each group's own recipients are added on top.
+  # These cover the DEFAULT delivery — alerts for repos that are in no group, and the single alert sent
+  # when no groups are configured. With security_groups configured, each group's email CC's ONLY that
+  # group's own recipients; the list here is NOT fanned onto every group (that fan-out leaked one group's
+  # CC onto another). Repos left out of every group still alert the owner, CC'd to this list.
   - name: security_recipients
     key: security_recipients
     display_name: Security alert recipients (CC)
     type: string
     is_optional: true
     default_value: ""
-    helper_message: "Additional emails to CC on security alerts, comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them."
+    helper_message: "Default emails to CC on security alerts for repos not in any group (and on the single alert when no groups are set), comma separated (e.g. security@acme.com, lead@acme.com). The account owner always receives them. Each configured group CC's its own recipients instead."
 
   # Project groups for SECURITY alerts. Each group is {name, repos[], recipients[]} and routes that
-  # group's alerts to its own recipients (owner always primary; security_recipients CC'd on every group).
-  # Mirrors digest_groups but is a SEPARATE list, because the security audience (engineers / security
-  # leads) usually differs from the digest audience (leadership). Grouping is delivery-only: scanning and
-  # the dedup ledger stay global (reconcile once, split at send), so the code-finding cap becomes per
-  # group. Empty/unset -> ONE implicit group over all selected repos (owner only), so alerts ship with
-  # zero dashboard setup. A repo left out of every group still alerts the OWNER (never silently dropped).
-  # Stored as a JSON string (data_type "list").
+  # group's alerts to its OWN recipients only (owner always primary). Repo membership is exclusive: a
+  # repo belongs to the first group that lists it, so a finding's alert reaches exactly one group's
+  # recipients (no cross-group CC leak). Mirrors digest_groups but is a SEPARATE list, because the
+  # security audience (engineers / security leads) usually differs from the digest audience (leadership).
+  # Grouping is delivery-only: scanning and the dedup ledger stay global (reconcile once, split at send),
+  # so the code-finding cap becomes per group. Empty/unset -> ONE implicit group over all selected repos
+  # (CC'd to security_recipients), so alerts ship with zero dashboard setup. A repo left out of every
+  # group still alerts the OWNER, CC'd to security_recipients (never silently dropped). Stored as a JSON
+  # string (data_type "list").
   - name: security_groups
     key: security_groups
     display_name: "Security alert groups"
