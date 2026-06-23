@@ -363,25 +363,16 @@ def build_subject(findings):
     return f"GitZoid Security: {count} in {where}"
 
 
-def parse_recipients(value):
-    """Parse a comma/semicolon/space separated email string into a clean list (best-effort). These
-    are CC'd on security alerts; the account owner is always the primary recipient via the SDK."""
-    if not value:
-        return []
-    parts = re.split(r"[,;\s]+", str(value).strip())
-    return [p for p in parts if "@" in p and "." in p.split("@")[-1]]
-
-
 # ---------------------------------------------------------------- group routing (per-group delivery)
 # A separate `security_groups` config var (mirrors the digest's digest_groups) lets alerts for
 # different repos go to different people. Grouping is purely a DELIVERY-time partition: the scan
 # pipeline and the persistent `security_findings` ledger stay GLOBAL (reconcile once above, split at
 # send), so dedup / escalation / resolved logic is untouched. Repo membership is made EXCLUSIVE in
 # resolve_groups (first group to claim a repo owns it), so a repo's findings reach exactly one group's
-# recipients — never leaking one group's CC onto another. The global `security_recipients` distro is
-# routed ONLY to the implicit/ungrouped (owner-default) units, not fanned onto explicit groups.
-# resolve_groups / parse_groups / slugify are duplicated from digest_check_and_init by the same
-# no-sibling-imports convention as the lock helpers above.
+# recipients — never leaking one group's CC onto another. Each group CC's only its own recipients; a
+# repo in no group (and the no-groups-configured case) alerts the OWNER only. resolve_groups /
+# parse_groups / slugify are duplicated from digest_check_and_init by the same no-sibling-imports
+# convention as the lock helpers above.
 
 def parse_groups(raw):
     """The security_groups input is stored by the dashboard as a JSON string; fetch may return it
@@ -412,19 +403,16 @@ def _selected_ids(repositories):
     return out
 
 
-def resolve_groups(security_groups, repositories, global_recipients=None):
+def resolve_groups(security_groups, repositories):
     """Normalize the security_groups input into this run's delivery map. Each configured group's
     repos are intersected with the globally-selected set (a repo deselected globally drops out) AND
     made EXCLUSIVE: a repo belongs to the FIRST group that claims it and is dropped from later groups,
     so no repo's findings can ever route to two groups' recipients (the cross-group CC leak). Groups
     left with no repo of their own are dropped. If no non-empty group survives, fall back to ONE
-    implicit group over ALL selected repos — and the global `security_recipients` become THAT group's
-    CC (the zero-config 'owner + org distro' delivery). Explicit groups CC only their OWN recipients;
-    the global list is NOT fanned onto them (that fan-out was the leak). Slugs are unique and stable.
-    Returns [{name, repos, recipients, slug, implicit}]."""
+    implicit group over ALL selected repos (owner only). Each group CC's only its OWN recipients.
+    Slugs are unique and stable. Returns [{name, repos, recipients, slug, implicit}]."""
     selected = _selected_ids(repositories)
     selected_set = set(selected)
-    global_recipients = [e for e in (global_recipients or []) if e]
 
     groups, claimed = [], set()
     for g in (security_groups or []):
@@ -444,8 +432,7 @@ def resolve_groups(security_groups, repositories, global_recipients=None):
                        "implicit": False})
 
     if not groups and selected:
-        groups = [{"name": "", "repos": selected, "recipients": list(global_recipients),
-                   "implicit": True}]
+        groups = [{"name": "", "repos": selected, "recipients": [], "implicit": True}]
 
     seen, out = set(), []
     for i, g in enumerate(groups):
@@ -471,16 +458,15 @@ def clean_email_list(values):
     return out
 
 
-def group_alerts(to_alert, groups, global_recipients=None):
+def group_alerts(to_alert, groups):
     """Partition the reconciled to-alert findings into per-group send units, by the finding's repo.
     Each explicit group with at least one finding becomes one unit (its OWN recipients CC'd; the owner
-    is always primary). A finding whose repo is in no group collects into ONE catch-all unit CC'd to
-    the global `security_recipients` distro, so a security finding is NEVER silently dropped because
-    its repo was left out of every group. Groups with no findings this run produce no unit (no empty
-    emails). The code-section cap is applied later, per unit, so it becomes per-group. resolve_groups
-    has already made repo membership exclusive, so the first-group-wins map below is unambiguous.
-    Returns [{slug, recipients, repo_count, findings}] with the catch-all (if any) last."""
-    global_recipients = [e for e in (global_recipients or []) if e]
+    is always primary). A finding whose repo is in no group collects into ONE owner-only catch-all unit,
+    so a security finding is NEVER silently dropped because its repo was left out of every group. Groups
+    with no findings this run produce no unit (no empty emails). The code-section cap is applied later,
+    per unit, so it becomes per-group. resolve_groups has already made repo membership exclusive, so the
+    first-group-wins map below is unambiguous. Returns [{slug, recipients, repo_count, findings}] with
+    the catch-all (if any) last."""
     repo_to_group = {}
     for g in (groups or []):
         for r in (g.get("repos") or []):
@@ -501,7 +487,7 @@ def group_alerts(to_alert, groups, global_recipients=None):
         unit["findings"].append(f)
     if ungrouped:
         repos = {f.get("repo") for f in ungrouped if f.get("repo")}
-        units.append({"slug": "ungrouped", "recipients": list(global_recipients),
+        units.append({"slug": "ungrouped", "recipients": [],
                       "repo_count": len(repos), "findings": ungrouped})
     return units
 
@@ -546,13 +532,9 @@ if not skip:
         # we fan the to-alert set out per group (resolve_groups applies the implicit 'default all'
         # fallback) so different repos route to different people. The code cap is applied per unit
         # below, so it is per-group; a repo in no group still alerts the owner via the catch-all unit.
-        # The global `security_recipients` distro covers ONLY ungrouped/implicit delivery (the catch-all
-        # unit and the zero-config single group); it is NOT fanned onto explicit groups, which CC only
-        # their own recipients. Passing it into resolve/group_alerts routes it to exactly those units.
-        global_cc = parse_recipients(waveassist.fetch_data("security_recipients", default="") or "")
         groups = resolve_groups(parse_groups(waveassist.fetch_data("security_groups", default=[])),
-                                repositories, global_recipients=global_cc)
-        units = group_alerts(to_alert, groups, global_recipients=global_cc)
+                                repositories)
+        units = group_alerts(to_alert, groups)
 
         sent_count, total_issues, last_html, results = 0, 0, "", []
         for unit in units:
@@ -562,8 +544,8 @@ if not skip:
             displayed = rank_findings(kept_code + deps)  # exactly what THIS group's email shows
             subject = build_subject(displayed)           # subject + count agree with the body
             email_html = build_alert_email(kept_code, deps, unit["repo_count"])
-            # CC is this unit's recipients only: an explicit group's own recipients, or — for the
-            # implicit/ungrouped units — the global distro already folded in upstream. No cross-group fan-out.
+            # CC is this unit's own recipients only (owner is always primary via the SDK). Explicit
+            # groups CC their recipients; the implicit/ungrouped units are owner-only. No cross-group CC.
             cc = clean_email_list(list(unit["recipients"]))
             last_html = email_html
             n = _issue_count(displayed)
