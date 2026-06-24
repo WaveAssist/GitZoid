@@ -631,8 +631,11 @@ def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
+skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
+if skip_run:
+    print("GitZoid: skip_run set; generate_review no-op (another run in progress).")
 prs = waveassist.fetch_data("pull_requests", default=[]) or []
-if prs:
+if prs and not skip_run:
     repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
     repo_config = {r["id"]: r.get("properties", {}) for r in repositories if isinstance(r, dict) and r.get("id")}
     global_model = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL

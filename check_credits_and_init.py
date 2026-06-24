@@ -39,7 +39,7 @@ CREDITS_NEEDED_FOR_RUN = 0.3
 # crash safety net: generous enough for the slowest legit run (first full brain build of all repos
 # + reviews), so it never serializes normal fast cycles, but frees a wedged lock automatically.
 RUN_LOCK_KEY = "run_lock"
-LOCK_TTL_SECONDS = 1800   # 30 min
+LOCK_TTL_SECONDS = 7200   # 2 hours
 
 
 def lock_is_active(lock, now=None) -> bool:
@@ -98,6 +98,7 @@ if lock_is_active(existing_lock):
         "html_content": "<p>GitZoid is already reviewing your pull requests. This run will be skipped.</p>",
     }
     waveassist.store_data("display_output", display_output, run_based=True, data_type="json")
+    waveassist.mark_run_idle()
 else:
     token = str(uuid.uuid4())
     waveassist.store_data(

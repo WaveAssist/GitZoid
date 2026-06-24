@@ -173,6 +173,7 @@ if not enabled or not groups:
     waveassist.store_data("display_output", {
         "html_content": f"<p>GitZoid Digest run skipped — {reason}.</p>",
     }, run_based=True, data_type="json")
+    waveassist.mark_run_idle()
 else:
     success = waveassist.check_credits_and_notify(
         required_credits=CREDITS_NEEDED_FOR_RUN,
@@ -191,6 +192,7 @@ else:
         waveassist.store_data("display_output", {
             "html_content": "<p>GitZoid is already preparing a digest. This cycle will be skipped.</p>",
         }, run_based=True, data_type="json")
+        waveassist.mark_run_idle()
     else:
         token = str(uuid.uuid4())
         waveassist.store_data(RUN_LOCK_KEY,
