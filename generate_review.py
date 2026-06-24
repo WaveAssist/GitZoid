@@ -537,6 +537,21 @@ class VerifyVerdict(BaseModel):
                     "If not real: exactly why it cannot occur.")
 
 
+class VerifyItem(VerifyVerdict):
+    """One verdict inside a batched verify response, keyed back to its finding by `index`."""
+    index: int = Field(
+        description="The number of the finding this verdict is for, exactly as labeled "
+                    "('Finding 1', 'Finding 2', ...) in the prompt.")
+
+
+class BatchVerifyResult(BaseModel):
+    """Adversarial re-check of ALL gate-kept findings in ONE call — one verdict per finding,
+    each keyed by its `index`. Batching keeps the (expensive) review-model round-trips to a single
+    call per PR instead of one per finding."""
+    verdicts: List[VerifyItem] = Field(default_factory=list,
+        description="Exactly one verdict per finding shown, each carrying its matching `index`. Do not omit any.")
+
+
 def _gh_raw_headers(token):
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}
 
@@ -567,40 +582,56 @@ def context_window(file_text, line):
     return "\n".join(lines[lo:hi])
 
 
-def get_verify_prompt(finding, context_code):
+def _finding_loc(finding):
     line = finding.get("line")
-    loc = f"{finding.get('path') or '(cross-cutting)'}:{line}" if line else (finding.get("path") or "(cross-cutting)")
-    return f"""You are adversarially RE-CHECKING one code-review finding before it is posted. Default
-to skeptical: it survives only if it genuinely holds against the FULL code below.
+    return f"{finding.get('path') or '(cross-cutting)'}:{line}" if line else (finding.get("path") or "(cross-cutting)")
 
-FINDING (claimed {finding.get('severity')} {finding.get('category')} at {loc}):
-{finding.get('body')}
 
-SURROUNDING CODE (the full file when available, otherwise the diff — trace it, do not assume):
-```
-{context_code}
-```
+def get_batch_verify_prompt(items):
+    """ONE adversarial re-check prompt covering ALL gate-kept findings. `items` is a list of
+    (index, finding, context_code); each finding is shown with its OWN surrounding code so a verdict
+    is judged against the right file. One structured verdict per finding, keyed by `index`."""
+    blocks = []
+    for idx, finding, context_code in items:
+        blocks.append(
+            f"### Finding {idx} (claimed {finding.get('severity')} {finding.get('category')} at {_finding_loc(finding)})\n"
+            f"{finding.get('body')}\n\n"
+            f"SURROUNDING CODE for Finding {idx} (full file when available, otherwise the diff — trace it, do not assume):\n"
+            f"```\n{context_code}\n```")
+    joined = "\n\n".join(blocks)
+    return f"""You are adversarially RE-CHECKING {len(items)} code-review finding(s) before they are
+posted. Default to skeptical: a finding survives only if it genuinely holds against the FULL code
+shown FOR THAT finding.
 
-- is_real: False ONLY if the code shows this cannot actually happen on that line (a guard/early-return
-  makes it unreachable, or the finding misreads the code). If it can happen, or you can't rule it out, True.
+For EACH finding below, return one verdict object carrying its `index`:
+- is_real: False ONLY if that finding's code shows it cannot actually happen on that line (a guard/
+  early-return makes it unreachable, or the finding misreads the code). If it can happen, or you
+  can't rule it out, True.
 - true_severity: judge impact WITH the full context (a guarded or edge case is medium/low, not high).
 - reason: if real, name the concrete trigger (input + path to the line); if not, say exactly why it can't occur.
-Return only the structured verdict."""
+
+Return exactly one verdict per finding, each with the matching `index`. Do not omit any, do not merge.
+
+{joined}"""
 
 
 def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity_threshold="high"):
-    """Refute each gate-kept finding against its full function, drop clear false positives, correct
-    inflated severity, then re-gate so the verdict reflects reality. Returns (kept, verdict, dropped).
-    Fails open per-finding (see module note above)."""
+    """Refute the gate-kept findings against their full functions in a SINGLE batched call, drop clear
+    false positives, correct inflated severity, then re-gate so the verdict reflects reality. Returns
+    (kept, verdict, dropped). Batching keeps the expensive review-model round-trips to one call per PR
+    instead of one per finding. Fails open (see module note above): a finding is dropped ONLY on an
+    explicit refutation; any unavailable context / LLM error keeps every affected finding as-is."""
     if not findings:
         return findings, "looks_good", []
     repo_path, head_sha = pr.get("id", ""), pr.get("current_sha", "")
     patches = {fl.get("filename"): (fl.get("patch") or "") for fl in (pr.get("files") or [])}
-    cache, survivors, dropped = {}, [], []
+    cache = {}
+    auto_keep = []            # kept without an LLM check (unanchored or no context) → fail open
+    batch = []                # (index, finding, context) — all sent in one verify call
     for f in findings:
         path = f.get("path") or ""
         if not path:
-            survivors.append(f); continue                       # unanchored → fail open
+            auto_keep.append(f); continue                       # unanchored → fail open
         if token and path not in cache:
             cache[path] = fetch_file_text(repo_path, path, head_sha, token)
         file_text = cache.get(path) or ""
@@ -608,23 +639,42 @@ def verify_posted_findings(findings, pr, token, model_name, diff_lines, severity
         # file can't be fetched — weaker, but better than skipping the check entirely.
         ctx = context_window(file_text, f.get("line")) if file_text else patches.get(path, "")
         if not ctx:
-            survivors.append(f); continue                       # no context at all → fail open
-        # Any failure here (LLM down, unexpected return, bad signature) fails OPEN — the finding is
-        # kept and the PR review proceeds. Verification must never be able to break a review.
+            auto_keep.append(f); continue                       # no context at all → fail open
+        batch.append((len(batch) + 1, f, ctx))
+
+    survivors, dropped = list(auto_keep), []
+    if batch:
+        # ONE adversarial call for the whole batch. Any failure here (LLM down, unexpected return,
+        # bad signature) fails OPEN — every batched finding is kept and the review proceeds.
+        # Verification must never be able to break a review.
         try:
-            verdict = waveassist.call_llm(
-                model=model_name, prompt=get_verify_prompt(f, ctx),
-                response_model=VerifyVerdict, should_retry=True, max_tokens=MAX_TOKENS)
-            v = verdict.model_dump() if verdict is not None else None
+            result = waveassist.call_llm(
+                model=model_name, prompt=get_batch_verify_prompt(batch),
+                response_model=BatchVerifyResult, should_retry=True, max_tokens=MAX_TOKENS)
+            items = list(result.verdicts) if result is not None else []
         except Exception as e:
-            print(f"   verify: error on {f.get('path')}:{f.get('line')} ({e}) — keeping finding.")
-            v = None
-        if not v:
-            survivors.append(f); continue                       # unavailable/error → fail open
-        if v.get("is_real") is False:                           # drop ONLY on explicit refutation;
-            dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue  # None/missing → keep (fail open)
-        # Verified real → trust the re-judged severity, and treat confidence as high.
-        survivors.append({**f, "severity": v.get("true_severity") or f.get("severity"), "confidence": "high"})
+            print(f"   verify: batch error ({e}) — keeping all {len(batch)} finding(s).")
+            items = []
+        # Map each verdict to its finding by explicit `index`. If an index is absent/garbled but the
+        # model returned one verdict per finding in order, fall back to positional mapping. A finding
+        # with no usable verdict is kept (fail open).
+        by_index = {}
+        for pos, it in enumerate(items, 1):
+            v = it.model_dump() if hasattr(it, "model_dump") else dict(it)
+            idx = v.get("index")
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (1 <= idx <= len(batch)):
+                idx = pos if len(items) == len(batch) else None
+            if idx is not None and idx not in by_index:
+                by_index[idx] = v
+        for idx, f, _ctx in batch:
+            v = by_index.get(idx)
+            if not v:
+                survivors.append(f); continue                   # no verdict for this finding → fail open
+            if v.get("is_real") is False:                       # drop ONLY on explicit refutation;
+                dropped.append({**f, "_drop_reason": v.get("reason", "")}); continue  # None/missing → keep
+            # Verified real → trust the re-judged severity, and treat confidence as high.
+            survivors.append({**f, "severity": v.get("true_severity") or f.get("severity"), "confidence": "high"})
+
     kept, verdict, _ = apply_gate(survivors, diff_lines, seen_sigs=set(), severity_threshold=severity_threshold)
     return kept, verdict, dropped
 

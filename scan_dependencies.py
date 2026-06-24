@@ -258,7 +258,7 @@ def _severity_from_cvss(score) -> str:
 def parse_osv_vuln(vuln: dict) -> dict:
     """Pull the fields we use from a full OSV vuln record: id, aliases, fixed version, severity,
     plain summary."""
-    vid = vuln.get("id", "")
+    vuln_id = vuln.get("id", "")
     aliases = list(vuln.get("aliases") or [])
     summary = vuln.get("summary") or (vuln.get("details") or "")[:300]
 
@@ -281,7 +281,7 @@ def parse_osv_vuln(vuln: dict) -> dict:
             if severity != "unknown":
                 break
 
-    return {"id": vid, "aliases": aliases, "fixed": fixed,
+    return {"id": vuln_id, "aliases": aliases, "fixed": fixed,
             "severity": severity, "summary": summary}
 
 
@@ -547,7 +547,8 @@ def suppress_new_advisory(repo, name, version, vuln_id, prior_ledger, alerted_pk
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 skip = waveassist.fetch_data("security_skip_run", run_based=True, default="0") == "1"
-repositories = [] if skip else (waveassist.fetch_data("github_selected_resources", default=[]) or [])
+resolved_groups = [] if skip else (waveassist.fetch_data("security_resolved_groups", run_based=True, default=[]) or [])
+repositories = [repo_path for group in resolved_groups for repo_path in (group.get("repos") or [])]
 
 if skip:
     print("GitZoid Security: security_skip_run set; scan_dependencies no-op.")
@@ -561,13 +562,18 @@ if repositories:
     alerted_pkgs = already_alerted_packages(prior_ledger)   # packages the user was already told to upgrade
     candidates = []
     scanned_ok = set()
-    # Within-run caches. OSV querybatch returns only {id, modified} — no severity or detail.
-    # Both caches cut redundant work when the same CVE appears across multiple repos.
-    _hydrate_cache = {}   # vuln_id → full OSV record (or None on failure)
-    _assess_cache  = {}   # vuln_id → (is_real, impact)
+    # Within-run cache of hydrated OSV records, keyed by advisory id. OSV querybatch returns only
+    # {id, modified} stubs (no severity/detail), so every hit must be hydrated via a second call; the
+    # SAME advisory recurs across repos that share a dependency, and hydration is a pure function of the
+    # id, so caching it removes the bulk of the per-advisory HTTP round-trips (the real cost of a large
+    # scan). ONLY successful hydrations are cached: a transient failure must retry on the next repo,
+    # never suppress a real advisory fleet-wide for the run.
+    # NOTE: assess_finding is deliberately NOT cached across repos — its verdict depends on each repo's
+    # brain profile (architecture_summary + reachability), so the same advisory can be a real risk in
+    # one repo and noise in another. The ledger cache below still avoids re-judging an already-open one.
+    hydrated_vulns = {}   # advisory_id -> full OSV record (successes only)
 
-    for repo in repositories:
-        repo_path = repo.get("id") if isinstance(repo, dict) else repo
+    for repo_path in repositories:
         if not repo_path:
             continue
         try:
@@ -588,30 +594,34 @@ if repositories:
 
             osv_hits, osv_ok = query_osv(deps)
             repo_findings = []
-            for (name, version), vuln_objs in osv_hits.items():
-                reach = dep_reachability(name, profile)
-                for vuln_obj in vuln_objs:
-                    vid = vuln_obj.get("id")
-                    if suppress_new_advisory(repo_path, name, version, vid, prior_ledger, alerted_pkgs):
-                        print(f"· {name} {version}: new advisory {vid} suppressed "
+            for (package_name, package_version), vuln_stubs in osv_hits.items():
+                reachability = dep_reachability(package_name, profile)
+                for vuln_stub in vuln_stubs:
+                    advisory_id = vuln_stub.get("id")
+                    if suppress_new_advisory(repo_path, package_name, package_version, advisory_id,
+                                             prior_ledger, alerted_pkgs):
+                        print(f"· {package_name} {package_version}: new advisory {advisory_id} suppressed "
                               f"(package already alerted; upgrade recommendation unchanged)")
                         continue
-                    # Hydrate once per unique CVE across all repos this run.
-                    if vid not in _hydrate_cache:
-                        _hydrate_cache[vid] = hydrate_vuln(vid)
-                    full = _hydrate_cache[vid]
-                    if not full:
+                    # Hydrate once per unique advisory across all repos this run (successes cached; a
+                    # failed fetch retries on the next repo rather than caching a miss that hides it).
+                    vuln_record = hydrated_vulns.get(advisory_id)
+                    if vuln_record is None:
+                        vuln_record = hydrate_vuln(advisory_id)
+                        if vuln_record:
+                            hydrated_vulns[advisory_id] = vuln_record
+                    if not vuln_record:
                         continue
-                    parsed = parse_osv_vuln(full)
+                    parsed_vuln = parse_osv_vuln(vuln_record)
                     finding = {
                         "category": "dependency", "repo": repo_path,
-                        "name": name, "version": version,
-                        "ecosystem": next((d["ecosystem"] for d in deps if d["name"] == name), ""),
-                        "vuln_id": parsed["id"], "aliases": parsed["aliases"],
-                        "fixed": parsed["fixed"], "severity": parsed["severity"],
-                        "summary": parsed["summary"],
-                        "actively_exploited": is_actively_exploited(cve_aliases(full), kev_set),
-                        "used": reach["used"], "in_auth_path": reach["in_auth_path"],
+                        "name": package_name, "version": package_version,
+                        "ecosystem": next((d["ecosystem"] for d in deps if d["name"] == package_name), ""),
+                        "vuln_id": parsed_vuln["id"], "aliases": parsed_vuln["aliases"],
+                        "fixed": parsed_vuln["fixed"], "severity": parsed_vuln["severity"],
+                        "summary": parsed_vuln["summary"],
+                        "actively_exploited": is_actively_exploited(cve_aliases(vuln_record), kev_set),
+                        "used": reachability["used"], "in_auth_path": reachability["in_auth_path"],
                     }
                     if not passes_feed_gate(finding):
                         continue
@@ -619,19 +629,15 @@ if repositories:
                     # the ledger), reuse that verdict and impact instead of re-running a
                     # non-deterministic LLM every day — a daily flip is what made the same dependency
                     # silently resolve then re-alert (issue #1).
-                    cached = prior_ledger.get(_dep_sig(repo_path, name, parsed["id"]))
-                    if isinstance(cached, dict) and cached.get("status") == "open":
-                        finding["impact"] = cached.get("impact") or ""
+                    ledger_entry = prior_ledger.get(_dep_sig(repo_path, package_name, parsed_vuln["id"]))
+                    if isinstance(ledger_entry, dict) and ledger_entry.get("status") == "open":
+                        finding["impact"] = ledger_entry.get("impact") or ""
                         repo_findings.append(finding)
                         continue
-                    # Reuse assess_finding result if the same CVE already judged this run.
-                    if vid in _assess_cache:
-                        is_real, impact = _assess_cache[vid]
-                    else:
-                        is_real, impact = assess_finding(model_name, finding, profile)
-                        _assess_cache[vid] = (is_real, impact)
+                    # Per-repo realism judgement (NOT cached across repos — see note at hydrated_vulns).
+                    is_real, impact = assess_finding(model_name, finding, profile)
                     if not is_real:
-                        print(f"· dropped {name} {parsed['id']} (model: not a realistic risk)")
+                        print(f"· dropped {package_name} {parsed_vuln['id']} (model: not a realistic risk)")
                         continue
                     finding["impact"] = impact
                     repo_findings.append(finding)

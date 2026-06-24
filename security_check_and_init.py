@@ -18,6 +18,8 @@ Flat script, no __main__ guard. On no-credits it stores a display_output and rai
 marked failed — the intended "skipped, buy credits" signal). It does NOT raise on security-disabled,
 missing repos, or a lock-skip: those are clean daily no-ops, not failed runs.
 """
+import re
+import json
 import uuid
 from datetime import datetime, timezone
 import waveassist
@@ -29,7 +31,11 @@ CREDITS_NEEDED_FOR_RUN = 0.3
 # Single-run lock for the security chain. Held from here until triage_and_alert releases it. The TTL
 # is a crash safety net generous enough for the slowest legit run (a weekly deep audit of every repo).
 RUN_LOCK_KEY = "security_run_lock"
-LOCK_TTL_SECONDS = 2700   # 45 min
+# 2 hours, matching the Review lock. A legit run can wait in the Celery queue under load AND then run a
+# ~20-min deep audit, so a short TTL risked expiring mid-run (the premature-expiry class the Review lock
+# was bumped for). The chain fires only daily, so a generous TTL never serializes normal cycles; it just
+# frees a genuinely crashed run instead of wedging the next day's scan.
+LOCK_TTL_SECONDS = 7200   # 2 hours
 
 # Upfront progress-bar budget (seconds), mirroring the Review gate so the dashboard bar shows from
 # second 0. The weekly deep audit dominates a security run (one large-context LLM call per repo), so
@@ -71,15 +77,75 @@ def security_enabled(value) -> bool:
     return str(value).strip().lower() not in ("false", "no", "off", "0")
 
 
+def _parse_groups(raw):
+    """security_groups may be stored as a JSON string or already-parsed list."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _slugify(name, index) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return s or f"group-{index + 1}"
+
+
+def _resolve_security_groups(security_groups, repositories):
+    """Resolve security_groups against the globally-selected repos. Exclusive membership: first group
+    to claim a repo owns it (no cross-group CC leak). Falls back to one implicit group of all repos
+    when no groups are configured. Mirrors triage_and_alert.resolve_groups exactly — resolved once
+    here so every downstream node (scan, audit, triage) works from the same scoped set."""
+    selected = [r.get("id") if isinstance(r, dict) else r for r in (repositories or []) if
+                (r.get("id") if isinstance(r, dict) else r)]
+    selected_set = set(selected)
+
+    groups, claimed = [], set()
+    for g in (security_groups or []):
+        if not isinstance(g, dict):
+            continue
+        repos = []
+        for p in (g.get("repos") or []):
+            if p in selected_set and p not in claimed:
+                repos.append(p)
+                claimed.add(p)
+        if not repos:
+            continue
+        groups.append({"name": (g.get("name") or "").strip(), "repos": repos,
+                       "recipients": [e for e in (g.get("recipients") or []) if e],
+                       "implicit": False})
+
+    if not groups and selected:
+        groups = [{"name": "", "repos": selected, "recipients": [], "implicit": True}]
+
+    seen, out = set(), []
+    for i, g in enumerate(groups):
+        base = _slugify(g["name"], i)
+        slug, n = base, 2
+        while slug in seen:
+            slug = f"{base}-{n}"
+            n += 1
+        seen.add(slug)
+        g["slug"] = slug
+        out.append(g)
+    return out
+
+
 waveassist.init()
 
 print("GitZoid Security: starting daily credits check and initialization...")
 
 enabled = security_enabled(waveassist.fetch_data("enable_security", default=None))
 repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
-num_repos = len(repositories) if isinstance(repositories, list) else 0
+groups = _resolve_security_groups(
+    _parse_groups(waveassist.fetch_data("security_groups", default=[])), repositories)
+num_repos = sum(len(g["repos"]) for g in groups)
 
-if not enabled or num_repos == 0:
+if not enabled or not groups:
     reason = "Security Watch is turned off" if not enabled else "no repositories are connected"
     print(f"GitZoid Security: {reason}; skipping this cycle (clean no-op).")
     # Run-based STRING "1"/"0" — NOT a json bool (the SDK wraps that as a truthy {"value":"False"} dict).
@@ -115,9 +181,12 @@ else:
         # run-based so downstream security nodes in THIS run know they hold the lock (and may release it).
         waveassist.store_data("security_run_lock_token", token, run_based=True, data_type="string")
         waveassist.store_data("security_skip_run", "0", run_based=True, data_type="string")
+        # The resolved working set every downstream node fans out over.
+        waveassist.store_data("security_resolved_groups", groups, run_based=True, data_type="json")
         # Upfront so the dashboard progress bar shows from second 0, through a possible deep audit.
         waveassist.store_data("tentative_time_to_process",
                               str(estimate_time_to_process(num_repos)),
                               run_based=True, data_type="string")
-        print(f"GitZoid Security: credits OK, lock acquired. Scanning {num_repos} repo(s); "
-              f"est ~{estimate_time_to_process(num_repos)}s.")
+        group_names = [g["name"] or "(all)" for g in groups]
+        print(f"GitZoid Security: credits OK, lock acquired. Scanning {num_repos} repo(s) across "
+              f"{len(groups)} group(s): {', '.join(group_names)}; est ~{estimate_time_to_process(num_repos)}s.")

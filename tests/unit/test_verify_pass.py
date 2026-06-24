@@ -30,6 +30,21 @@ def _verdict(is_real, sev="high", reason="r"):
     return VerifyVerdict(is_real=is_real, true_severity=sev, reason=reason)
 
 
+def _batch(*triples):
+    """Build a batched verify response (one verdict object per finding, keyed by index).
+    Each triple is (index, is_real, severity). MagicMock-based so the helper stays decoupled
+    from the concrete response model's field validation."""
+    items = []
+    for idx, is_real, sev in triples:
+        it = MagicMock()
+        it.model_dump.return_value = {"index": idx, "is_real": is_real,
+                                      "true_severity": sev, "reason": "r"}
+        items.append(it)
+    b = MagicMock()
+    b.verdicts = items
+    return b
+
+
 DL = {("a.py", "RIGHT", 1), ("a.py", "RIGHT", 2)}
 PR = {"id": "owner/repo", "current_sha": "abc123"}
 
@@ -99,7 +114,7 @@ class TestVerifyPostedFindings:
     def test_refuted_high_is_dropped_and_pr_unblocked(self):
         # Headline case: a false-positive high bug is refuted → dropped, PR no longer blocked.
         with patch.object(gr, "fetch_file_text", return_value="code"), \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(False)):
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, False, "high"))):
             kept, verdict, dropped = verify_posted_findings([_F()], PR, "tok", "m", DL)
         assert kept == []
         assert verdict == "looks_good"
@@ -107,7 +122,7 @@ class TestVerifyPostedFindings:
 
     def test_confirmed_high_kept_and_blocks(self):
         with patch.object(gr, "fetch_file_text", return_value="code"), \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(True, "high")):
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, True, "high"))):
             kept, verdict, dropped = verify_posted_findings([_F()], PR, "tok", "m", DL)
         assert len(kept) == 1
         assert verdict == "needs_changes"
@@ -116,14 +131,14 @@ class TestVerifyPostedFindings:
     def test_real_but_inflated_to_low_is_dropped_by_regate(self):
         # Real but over-rated: verify says it's actually low → re-gate drops a low bug.
         with patch.object(gr, "fetch_file_text", return_value="code"), \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(True, "low")):
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, True, "low"))):
             kept, verdict, _ = verify_posted_findings([_F()], PR, "tok", "m", DL)
         assert kept == []
         assert verdict == "looks_good"
 
     def test_real_downgraded_to_medium_kept_as_minor(self):
         with patch.object(gr, "fetch_file_text", return_value="code"), \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(True, "medium")):
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, True, "medium"))):
             kept, verdict, _ = verify_posted_findings([_F()], PR, "tok", "m", DL, severity_threshold="medium")
         assert len(kept) == 1
         assert verdict == "minor_comments"
@@ -140,7 +155,7 @@ class TestVerifyPostedFindings:
         pr = {"id": "owner/repo", "current_sha": "abc",
               "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n+bad line"}]}
         with patch.object(gr, "fetch_file_text", return_value=""), \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(False)) as llm:
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, False, "high"))) as llm:
             kept, _, dropped = verify_posted_findings([_F()], pr, "tok", "m", DL)
         llm.assert_called_once()                      # ran via diff fallback, not skipped
         assert kept == [] and len(dropped) == 1
@@ -148,6 +163,28 @@ class TestVerifyPostedFindings:
     def test_file_fetched_once_per_path(self):
         # Two findings, same file → one fetch (cache).
         with patch.object(gr, "fetch_file_text", return_value="code") as fx, \
-             patch.object(gr.waveassist, "call_llm", return_value=_verdict(True, "high")):
+             patch.object(gr.waveassist, "call_llm", return_value=_batch((1, True, "high"), (2, True, "high"))):
             verify_posted_findings([_F(line=1), _F(line=2)], PR, "tok", "m", DL)
         assert fx.call_count == 1
+
+    def test_all_findings_verified_in_one_llm_call(self):
+        # Point 1: every gate-kept finding is checked in a SINGLE batched LLM call, not one per finding.
+        findings = [_F(path="a.py", line=1), _F(path="b.py", line=2)]
+        dl = {("a.py", "RIGHT", 1), ("b.py", "RIGHT", 2)}
+        with patch.object(gr, "fetch_file_text", return_value="code"), \
+             patch.object(gr.waveassist, "call_llm",
+                          return_value=_batch((1, True, "high"), (2, True, "high"))) as llm:
+            kept, _, _ = verify_posted_findings(findings, PR, "tok", "m", dl)
+        llm.assert_called_once()
+        assert len(kept) == 2
+
+    def test_batch_indexes_map_verdicts_to_findings(self):
+        # The verdict for index 2 (refuted) must drop the SECOND finding, keep the first.
+        findings = [_F(path="a.py", line=1, body="keep me"), _F(path="b.py", line=2, body="drop me")]
+        dl = {("a.py", "RIGHT", 1), ("b.py", "RIGHT", 2)}
+        with patch.object(gr, "fetch_file_text", return_value="code"), \
+             patch.object(gr.waveassist, "call_llm",
+                          return_value=_batch((1, True, "high"), (2, False, "high"))):
+            kept, _, dropped = verify_posted_findings(findings, PR, "tok", "m", dl)
+        assert [f["body"] for f in kept] == ["keep me"]
+        assert [f["body"] for f in dropped] == ["drop me"]

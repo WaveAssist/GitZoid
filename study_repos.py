@@ -26,7 +26,15 @@ print("Processing GitZoid brain build (study_repos) node")
 GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 20
 RATE_SLEEP = 0.2
-STALE_BRANCH_LEAD_DAYS = 14
+# Default to the canonical branch; only switch to a more-recent branch (even a feature branch) if it
+# leads the canonical one by at least this many days. So a long-stale main yields to active dev, but a
+# branch that is merely a little ahead does not pull profiling off the trunk.
+BRANCH_SWITCH_LEAD_DAYS = 30
+# Branch names treated as canonical "trunk" lines, used as the fallback when GitHub's default-branch
+# lookup fails. Exact names plus the release/* family.
+STANDARD_BRANCH_NAMES = ("main", "master", "develop", "dev", "uat",
+                         "staging", "stage", "production", "prod", "trunk")
+STANDARD_BRANCH_PREFIXES = ("release/", "releases/")
 PROFILE_TTL_DAYS = 14                # brain refreshes every 14 days (time-based, not on SHA change)
 TREE_BLOB_CAP = 800
 FILE_CHAR_CAP = 10000
@@ -125,12 +133,37 @@ def _gh_get(url, headers, params=None):
     return requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
 
 
-def get_default_branch(repo_path, headers):
-    r = _gh_get(f"{GITHUB_API}/repos/{repo_path}", headers)
-    if r.status_code != 200:
-        print(f"⚠️ repo meta {repo_path}: {r.status_code}")
-        return None
-    return r.json().get("default_branch")
+def get_default_branch(repo_path, headers, attempts=2):
+    """GitHub's configured default branch, with a light retry. A transient non-200 (rate limit /
+    network blip) must NOT be read as 'no default' — that would silently push branch selection onto a
+    feature branch. Returns the branch name, or None only after every attempt fails."""
+    for i in range(attempts):
+        r = _gh_get(f"{GITHUB_API}/repos/{repo_path}", headers)
+        if r.status_code == 200:
+            return r.json().get("default_branch")
+        print(f"⚠️ repo meta {repo_path}: {r.status_code} (attempt {i + 1}/{attempts})")
+        if i < attempts - 1:
+            time.sleep(RATE_SLEEP)
+    return None
+
+
+def _is_standard_branch(name):
+    """True for canonical 'trunk' names (main/master/dev/uat/staging/...) and the release/* family."""
+    n = (name or "").lower()
+    return n in STANDARD_BRANCH_NAMES or any(n.startswith(p) for p in STANDARD_BRANCH_PREFIXES)
+
+
+def most_recent_standard_branch(repo_path, branches, headers):
+    """Most recently committed branch among STANDARD-named branches — the canonical fallback when the
+    default-branch lookup fails. Bounded: only standard-named branches are date-checked (and at most
+    MAX_ACTIVE_BRANCH_SCAN of them) to keep API/rate-limit cost down."""
+    std = [b for b in branches if _is_standard_branch(b.get("name"))][:MAX_ACTIVE_BRANCH_SCAN]
+    best = None
+    for b in std:
+        d = branch_tip_date(repo_path, b["commit_sha"], headers)
+        if d and (best is None or d > best["date"]):
+            best = {**b, "date": d}
+    return best
 
 
 def list_branches(repo_path, headers, max_pages=5):
@@ -172,8 +205,17 @@ def most_active_branch(repo_path, branches, headers):
 
 
 def select_canonical_branch(repo_path, headers, override=""):
-    """Pick the ONE branch to profile. Returns {branch, sha, source[, suggestion]}.
-    source in {override, default, active-fallback, none}. Staleness only yields a suggestion."""
+    """Pick the ONE branch to profile. Returns {branch, sha, source[, note]}.
+
+    Preference order:
+      1. explicit override (if it exists on the repo),
+      2. the CANONICAL branch — GitHub's default branch, or, if that lookup fails, the most-recently
+         committed STANDARD-named branch (main/master/dev/uat/staging/release-*) — never a feature
+         branch by default,
+      3. UNLESS some branch leads the canonical one by >= BRANCH_SWITCH_LEAD_DAYS days, in which case
+         that more-recent branch wins (so an actively developed branch is profiled instead of a long
+         stale trunk; a branch only a little ahead does not pull profiling off the trunk).
+    source in {override, default, standard-fallback, recent-lead, active-fallback, none}."""
     branches = list_branches(repo_path, headers)
     names = {b["name"]: b for b in branches}
 
@@ -182,23 +224,36 @@ def select_canonical_branch(repo_path, headers, override=""):
     if override:
         print(f"⚠️ override branch '{override}' not on {repo_path}; ignoring")
 
+    # 1. Canonical = GitHub default branch; if that can't be resolved, the most-recent standard branch.
     default = get_default_branch(repo_path, headers)
     if default and default in names:
-        chosen = {"branch": default, "sha": names[default]["commit_sha"], "source": "default"}
-        active = most_active_branch(repo_path, branches, headers)
-        if active and active["name"] != default:
-            d_date = branch_tip_date(repo_path, names[default]["commit_sha"], headers)
-            if d_date and active["date"] > d_date and \
-                    _days_between(d_date, active["date"]) >= STALE_BRANCH_LEAD_DAYS:
-                chosen["suggestion"] = (
-                    f"Branch '{active['name']}' is ~{_days_between(d_date, active['date'])}d more "
-                    f"recent than default '{default}'. Set the 'branch' override to profile it.")
-        return chosen
+        canonical = {"branch": default, "sha": names[default]["commit_sha"], "source": "default"}
+    else:
+        std = most_recent_standard_branch(repo_path, branches, headers)
+        canonical = ({"branch": std["name"], "sha": std["commit_sha"], "source": "standard-fallback"}
+                     if std else None)
 
-    active = most_active_branch(repo_path, branches, headers)
-    if active:
-        return {"branch": active["name"], "sha": active["commit_sha"], "source": "active-fallback"}
-    return {"branch": None, "sha": None, "source": "none"}
+    # 2. Challenger = most recently committed branch overall (may be a feature branch).
+    challenger = most_active_branch(repo_path, branches, headers)
+
+    # 3. No canonical at all (no default, no standard branch) → last-resort most-active branch.
+    if not canonical:
+        if challenger:
+            return {"branch": challenger["name"], "sha": challenger["commit_sha"], "source": "active-fallback"}
+        return {"branch": None, "sha": None, "source": "none"}
+
+    # 4. Switch off the canonical branch ONLY if another branch leads it by >= BRANCH_SWITCH_LEAD_DAYS.
+    if challenger and challenger["name"] != canonical["branch"]:
+        canonical_date = branch_tip_date(repo_path, canonical["sha"], headers)
+        if canonical_date and challenger["date"] > canonical_date:
+            lead = _days_between(canonical_date, challenger["date"])
+            if lead >= BRANCH_SWITCH_LEAD_DAYS:
+                return {"branch": challenger["name"], "sha": challenger["commit_sha"],
+                        "source": "recent-lead",
+                        "note": (f"Profiling '{challenger['name']}' instead of '{canonical['branch']}': "
+                                 f"it is ~{lead}d more recent.")}
+
+    return canonical
 
 
 def get_branch_tree(repo_path, branch, headers):
@@ -411,8 +466,10 @@ for repo in repositories:
         profile_dict["_fingerprint"] = {"sha": chosen["sha"], "branch": chosen["branch"],
                                         "built_at": datetime.now(timezone.utc).isoformat(),
                                         "tree_truncated": truncated}
-        if chosen.get("suggestion"):
-            profile_dict["_branch_suggestion"] = chosen["suggestion"]
+        # When selection switched off the canonical branch (recent-lead), record why. Kept under the
+        # existing _branch_suggestion key so the dashboard surface is unchanged.
+        if chosen.get("note"):
+            profile_dict["_branch_suggestion"] = chosen["note"]
         store_profile(waveassist, repo_path, profile_dict)
         repo_groups[repo_path] = {"branch": chosen["branch"],
                                   "built_at": profile_dict["_fingerprint"]["built_at"]}

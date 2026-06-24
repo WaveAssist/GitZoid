@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from study_repos import (
     select_canonical_branch,
+    get_default_branch,
     list_branches,
     needs_rebuild,
     pick_key_files,
@@ -62,6 +63,67 @@ class TestBranchSelection:
         p2 = _resp(200, [{"name": "b100", "commit": {"sha": "s100"}}], links={})
         mock_get.side_effect = [p1, p2]
         assert len(list_branches("o/r", {})) == 101
+
+    @patch('study_repos.requests.get')
+    @patch('study_repos.get_default_branch')
+    @patch('study_repos.most_active_branch')
+    @patch('study_repos.branch_tip_date')
+    def test_switches_to_feature_when_lead_exceeds_threshold(self, mock_tip, mock_active, mock_default, mock_get):
+        # main last touched 33 days ago, feature/x 3 days ago → 30-day lead → profile the feature branch.
+        mock_get.return_value = _resp(200, [
+            {"name": "main", "commit": {"sha": "m1"}},
+            {"name": "feature/x", "commit": {"sha": "f1"}},
+        ])
+        mock_default.return_value = "main"
+        mock_active.return_value = {"name": "feature/x", "commit_sha": "f1", "date": "2026-06-22T00:00:00Z"}
+        mock_tip.return_value = "2026-05-20T00:00:00Z"          # main tip, 33 days earlier
+        c = select_canonical_branch("o/r", {})
+        assert c["branch"] == "feature/x"
+        assert c["source"] == "recent-lead"
+        assert c["sha"] == "f1"
+
+    @patch('study_repos.requests.get')
+    @patch('study_repos.get_default_branch')
+    @patch('study_repos.most_active_branch')
+    @patch('study_repos.branch_tip_date')
+    def test_keeps_canonical_when_lead_below_threshold(self, mock_tip, mock_active, mock_default, mock_get):
+        # feature/x is more recent but only by 12 days (< 30) → stick with the default branch.
+        mock_get.return_value = _resp(200, [
+            {"name": "main", "commit": {"sha": "m1"}},
+            {"name": "feature/x", "commit": {"sha": "f1"}},
+        ])
+        mock_default.return_value = "main"
+        mock_active.return_value = {"name": "feature/x", "commit_sha": "f1", "date": "2026-06-22T00:00:00Z"}
+        mock_tip.return_value = "2026-06-10T00:00:00Z"          # main tip, 12 days earlier
+        c = select_canonical_branch("o/r", {})
+        assert c["branch"] == "main"
+        assert c["source"] == "default"
+
+    @patch('study_repos.requests.get')
+    @patch('study_repos.get_default_branch')
+    @patch('study_repos.most_active_branch')
+    @patch('study_repos.branch_tip_date')
+    def test_standard_fallback_when_default_unresolved(self, mock_tip, mock_active, mock_default, mock_get):
+        # Default lookup fails (transient). Canonical falls back to a STANDARD branch (uat), never a
+        # feature branch — unless the feature branch leads by >= 30 days (it does not here).
+        mock_get.return_value = _resp(200, [
+            {"name": "uat", "commit": {"sha": "u1"}},
+            {"name": "feature/x", "commit": {"sha": "f1"}},
+        ])
+        mock_default.return_value = None
+        mock_active.return_value = {"name": "feature/x", "commit_sha": "f1", "date": "2026-06-15T00:00:00Z"}
+        mock_tip.return_value = "2026-06-20T00:00:00Z"          # uat tip, more recent than the feature branch
+        c = select_canonical_branch("o/r", {})
+        assert c["branch"] == "uat"
+        assert c["source"] == "standard-fallback"
+
+    @patch('study_repos.time.sleep', lambda *a, **k: None)
+    @patch('study_repos.requests.get')
+    def test_default_branch_retries_on_transient_failure(self, mock_get):
+        # A transient non-200 on the repo-meta call must be retried, not silently treated as "no default".
+        mock_get.side_effect = [_resp(500, {}), _resp(200, {"default_branch": "main"})]
+        assert get_default_branch("o/r", {}) == "main"
+        assert mock_get.call_count == 2
 
 
 class TestSkipRunNoOp:

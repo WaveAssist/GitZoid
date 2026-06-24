@@ -516,8 +516,14 @@ if not skip:
                                                       scanned_ok_deps=scanned_ok_deps,
                                                       scanned_ok_code=scanned_ok_code)
 
-    repositories = waveassist.fetch_data("github_selected_resources", default=[]) or []
-    scanned_repos = len(repositories) if isinstance(repositories, list) else 0
+    # security_resolved_groups is set by security_check_and_init (group-scoped, exclusive membership).
+    # Fall back to resolving from github_selected_resources for runs started before this change.
+    resolved_groups = waveassist.fetch_data("security_resolved_groups", run_based=True, default=[]) or []
+    if not resolved_groups:
+        _all_repos = waveassist.fetch_data("github_selected_resources", default=[]) or []
+        resolved_groups = resolve_groups(
+            parse_groups(waveassist.fetch_data("security_groups", default=[])), _all_repos)
+    scanned_repos = sum(len(g.get("repos") or []) for g in resolved_groups)
 
     waveassist.store_data(LEDGER_KEY, new_ledger, data_type="json")
 
@@ -528,13 +534,7 @@ if not skip:
         preview = False
 
     if to_alert:
-        # Grouping is a delivery-time split ONLY: the ledger was reconciled once globally above; here
-        # we fan the to-alert set out per group (resolve_groups applies the implicit 'default all'
-        # fallback) so different repos route to different people. The code cap is applied per unit
-        # below, so it is per-group; a repo in no group still alerts the owner via the catch-all unit.
-        groups = resolve_groups(parse_groups(waveassist.fetch_data("security_groups", default=[])),
-                                repositories)
-        units = group_alerts(to_alert, groups)
+        units = group_alerts(to_alert, resolved_groups)
 
         sent_count, total_issues, last_html, results = 0, 0, "", []
         for unit in units:
