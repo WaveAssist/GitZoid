@@ -34,8 +34,8 @@ MAX_ACTIVE_BRANCH_SCAN = 10          # cap branch date lookups (rate-limit care)
 # The brain is repo CONTEXT (architecture/conventions/deps) consumed by other nodes, not a user-facing
 # artifact, so it runs on the cheaper, faster Haiku to save credits — it is also the biggest token
 # consumer (it reads the repo). Decoupled from the per-PR review model; optional override via the
-# "brain_model" data key.
-BRAIN_MODEL = "anthropic/claude-haiku-4.5"
+# "lite_model" data key.
+LITE_MODEL = "anthropic/claude-haiku-4.5"
 
 KEY_FILE_HINTS = ("auth", "login", "session", "security", "middleware",
                   "route", "router", "api", "settings", "config", "server", "app")
@@ -369,7 +369,7 @@ if skip_run:
 
 repositories = [] if skip_run else (waveassist.fetch_data("github_selected_resources", default=[]) or [])
 access_token = waveassist.fetch_data("github_access_token", default="") or ""
-model_name = waveassist.fetch_data("brain_model", default=BRAIN_MODEL)
+model_name = waveassist.fetch_data("lite_model", default=LITE_MODEL)
 headers = {"Authorization": f"token {access_token}", "Accept": "application/vnd.github+json"}
 
 repo_paths = []
