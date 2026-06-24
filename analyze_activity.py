@@ -288,7 +288,7 @@ if skip:
 
 if isinstance(github_activity_data, dict) and github_activity_data:
     access_token = waveassist.fetch_data("github_access_token", default="") or ""
-    model_name = waveassist.fetch_data("model_name", default=DEFAULT_MODEL) or DEFAULT_MODEL
+    model_name = waveassist.fetch_data("lite_model", default=DEFAULT_MODEL) or DEFAULT_MODEL
     headers = _headers(access_token)
 
     repository_analyses = []

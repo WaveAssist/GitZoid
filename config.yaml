@@ -137,9 +137,9 @@ variables:
     helper_message: "Connect your GitHub account to the app"
     display_type: "base"
 
-  # Model is fixed to Claude Sonnet 4.6 for ALL repos — no user selection. Code reads `model_name`
-  # via fetch_data and falls back to DEFAULT_MODEL ("anthropic/claude-sonnet-4.6") when unset, so
-  # omitting this variable makes every run use Sonnet.
+  # Two model tiers — override via store_data, or leave unset to use the defaults below:
+  #   model_name  — primary model for reviews, reports, security audit (default: anthropic/claude-sonnet-4.6)
+  #   lite_model  — cheaper model for study_repos and analyze_activity (default: anthropic/claude-haiku-4.5)
 
   # Security Watch toggle. Default ON (existing + new users). Turning it off skips the whole security
   # chain cleanly (no failed runs). The daily scan is silent unless it finds something real.
