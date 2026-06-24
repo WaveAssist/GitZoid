@@ -290,11 +290,13 @@ class TestVerifyFailOpen:
         diff_lines = build_diff_lines(pr["files"])
         findings = [{"path": "a.py", "line": 1, "side": "RIGHT", "category": "bug",
                      "severity": "high", "body": "off-by-one", "confidence": "high"}]
-        vmock = Mock()
-        vmock.model_dump.return_value = verdict_dict
+        item = Mock()
+        item.model_dump.return_value = {**verdict_dict, "index": 1}
+        batch = Mock()
+        batch.verdicts = [item]
         with patch("generate_review.fetch_file_text", return_value="x = 1\n"), \
              patch("generate_review.waveassist") as wa:
-            wa.call_llm.return_value = vmock
+            wa.call_llm.return_value = batch
             return verify_posted_findings(findings, pr, "tok", "model", diff_lines, "high")
 
     def test_keeps_when_is_real_none(self):

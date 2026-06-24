@@ -397,7 +397,8 @@ def run_audit(model_name, repo_path, brain_profile, files):
 # ---------------------------------------------------------------- driver (flat, fall-through)
 
 skip = waveassist.fetch_data("security_skip_run", run_based=True, default="0") == "1"
-repositories = [] if skip else (waveassist.fetch_data("github_selected_resources", default=[]) or [])
+resolved_groups = [] if skip else (waveassist.fetch_data("security_resolved_groups", run_based=True, default=[]) or [])
+repositories = [repo_path for group in resolved_groups for repo_path in (group.get("repos") or [])]
 
 if skip:
     print("GitZoid Security: security_skip_run set; deep_security_audit no-op.")

@@ -108,6 +108,34 @@ else:
 _store_data("github_selected_resources", sel, data_type="json")            # global
 _store_data("security_skip_run", "0", run_based=True, data_type="string")  # as the start node sets
 _store_data("security_candidates", [], run_based=True, data_type="json")
+# Inject GH token from env if provided (overrides project-stored token; useful for test accounts).
+_gh_token = os.environ.get("GH_TOKEN") or ""
+if _gh_token:
+    _store_data("github_access_token", _gh_token, data_type="string")
+# Simulate what security_check_and_init would store: resolve security_groups into one implicit group
+# covering the test repos so scan/audit/triage all work from the same scoped set.
+_raw_groups = _real_fetch("security_groups", default=[]) or []
+if isinstance(_raw_groups, str):
+    try:
+        _raw_groups = json.loads(_raw_groups)
+    except Exception:
+        _raw_groups = []
+_sel_ids = [r.get("id") if isinstance(r, dict) else r for r in sel]
+_sel_set = set(_sel_ids)
+_resolved, _claimed = [], set()
+for _g in (_raw_groups or []):
+    if not isinstance(_g, dict):
+        continue
+    _repos = [p for p in (_g.get("repos") or []) if p in _sel_set and p not in _claimed]
+    if _repos:
+        _claimed.update(_repos)
+        _resolved.append({"name": (_g.get("name") or "").strip(), "repos": _repos,
+                          "recipients": [e for e in (_g.get("recipients") or []) if e],
+                          "slug": (_g.get("name") or "group-1").lower().replace(" ", "-"),
+                          "implicit": False})
+if not _resolved:
+    _resolved = [{"name": "", "repos": _sel_ids, "recipients": [], "slug": "group-1", "implicit": True}]
+_store_data("security_resolved_groups", _resolved, run_based=True, data_type="json")
 if LEDGER_FILE and os.path.exists(LEDGER_FILE):
     _store[("security_findings", False)] = json.load(open(LEDGER_FILE))     # seed prior ledger (global)
     print(f"[security-e2e] loaded ledger: {len(_store[('security_findings', False)])} prior finding(s)")
@@ -117,10 +145,12 @@ waveassist.fetch_data = _fetch
 waveassist.store_data = _store_data
 waveassist.is_test_run = lambda: not SEND   # preview unless --send
 
-targets = [_rid(r) for r in sel]
 print(f"[security-e2e] project={PROJECT} model={os.environ['CLAUDE_CLI_MODEL']} "
       f"email={'SEND (real)' if SEND else 'preview-only'}")
-print(f"[security-e2e] repos: {', '.join(targets)}")
+for _g in _resolved:
+    _label = _g['name'] or '(all repos)'
+    print(f"[security-e2e] group '{_label}': {', '.join(_g['repos'])}")
+print(f"[security-e2e] total scan scope: {sum(len(g['repos']) for g in _resolved)} repo(s) across {len(_resolved)} group(s)")
 print(f"[security-e2e] GitHub writes are HARD-BLOCKED; OSV/KEV reads + email allowed.\n")
 
 # 1) Brain — needed for reachability + audit scope. Skip with --no-brain to reuse any existing brain.

@@ -306,7 +306,8 @@ class TestQueryOsvStatus:
                             lambda *a, **k: _R(200, {"results": [{"vulns": [{"id": "OSV-1"}]}]}))
         hits, ok = query_osv([{"name": "requests", "version": "2.31.0", "ecosystem": "PyPI"}])
         assert ok is True
-        assert hits == {("requests", "2.31.0"): ["OSV-1"]}
+        # query_osv returns the full OSV stubs (the driver reads .get("id") then hydrates), not bare ids.
+        assert hits == {("requests", "2.31.0"): [{"id": "OSV-1"}]}
 
 
 class TestKevStatus:
