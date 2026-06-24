@@ -87,6 +87,7 @@ if not enabled or num_repos == 0:
     waveassist.store_data("display_output", {
         "html_content": f"<p>GitZoid Security run skipped — {reason}.</p>",
     }, run_based=True, data_type="json")
+    waveassist.mark_run_idle()
 else:
     success = waveassist.check_credits_and_notify(
         required_credits=CREDITS_NEEDED_FOR_RUN,
@@ -105,6 +106,7 @@ else:
         waveassist.store_data("display_output", {
             "html_content": "<p>GitZoid is already running a security scan. This cycle will be skipped.</p>",
         }, run_based=True, data_type="json")
+        waveassist.mark_run_idle()
     else:
         token = str(uuid.uuid4())
         waveassist.store_data(RUN_LOCK_KEY,

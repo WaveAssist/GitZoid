@@ -385,6 +385,12 @@ def release_run_lock():
 def run_driver():
     """Post reviews for every generated-but-unposted PR. Each PR is isolated (one bad PR never sinks
     the rest), and the run-lock is released in a finally so a crash anywhere never leaks it."""
+    skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
+    if skip_run:
+        print("GitZoid: skip_run set; post_comment no-op (another run in progress).")
+        waveassist.mark_run_idle()
+        release_run_lock()   # no-op: skipped runs never write run_lock_token, so token=="" → no release
+        return
     prs_to_review = waveassist.fetch_data("pull_requests", default=[]) or []
     should_process = any(pr.get("comment_generated") and not pr.get("comment_posted") for pr in prs_to_review)
     try:

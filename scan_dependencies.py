@@ -447,9 +447,13 @@ def collect_repo_dependencies(repo_path, branch, headers):
 
 
 def query_osv(deps):
-    """OSV querybatch → ({(name,version): [vuln_id,...]}, ok). `ok` is False ONLY when the OSV call
-    itself failed (HTTP error / exception), so the driver can tell a clean scan ({} , True) from a
-    feed hiccup ({}, False) and never resolve a finding just because a hiccup made it absent."""
+    """OSV querybatch → ({(name,version): [vuln_stub,...]}, ok).
+
+    OSV querybatch returns minimal stubs — only {id, modified} per vuln, no severity or
+    detail. The caller must hydrate_vuln each id to get the full record. Returning stubs
+    (rather than bare IDs) keeps the structure extensible if OSV ever enriches the batch
+    response. `ok` is False ONLY on HTTP/network error so the driver can distinguish a
+    clean scan ({}, True) from a feed hiccup ({}, False)."""
     batch = build_osv_batch(deps)
     if not batch["queries"]:
         return {}, True            # nothing to query is a successful (clean) scan
@@ -464,9 +468,9 @@ def query_osv(deps):
         return {}, False
     out = {}
     for dep, res in zip(deps, results):
-        ids = [v.get("id") for v in (res.get("vulns") or []) if v.get("id")]
-        if ids:
-            out[(dep["name"], dep["version"])] = ids
+        vulns = [v for v in (res.get("vulns") or []) if v.get("id")]
+        if vulns:
+            out[(dep["name"], dep["version"])] = vulns
     return out, True
 
 
@@ -557,6 +561,10 @@ if repositories:
     alerted_pkgs = already_alerted_packages(prior_ledger)   # packages the user was already told to upgrade
     candidates = []
     scanned_ok = set()
+    # Within-run caches. OSV querybatch returns only {id, modified} — no severity or detail.
+    # Both caches cut redundant work when the same CVE appears across multiple repos.
+    _hydrate_cache = {}   # vuln_id → full OSV record (or None on failure)
+    _assess_cache  = {}   # vuln_id → (is_real, impact)
 
     for repo in repositories:
         repo_path = repo.get("id") if isinstance(repo, dict) else repo
@@ -580,14 +588,18 @@ if repositories:
 
             osv_hits, osv_ok = query_osv(deps)
             repo_findings = []
-            for (name, version), vuln_ids in osv_hits.items():
+            for (name, version), vuln_objs in osv_hits.items():
                 reach = dep_reachability(name, profile)
-                for vid in vuln_ids:
+                for vuln_obj in vuln_objs:
+                    vid = vuln_obj.get("id")
                     if suppress_new_advisory(repo_path, name, version, vid, prior_ledger, alerted_pkgs):
                         print(f"· {name} {version}: new advisory {vid} suppressed "
                               f"(package already alerted; upgrade recommendation unchanged)")
                         continue
-                    full = hydrate_vuln(vid)
+                    # Hydrate once per unique CVE across all repos this run.
+                    if vid not in _hydrate_cache:
+                        _hydrate_cache[vid] = hydrate_vuln(vid)
+                    full = _hydrate_cache[vid]
                     if not full:
                         continue
                     parsed = parse_osv_vuln(full)
@@ -612,7 +624,12 @@ if repositories:
                         finding["impact"] = cached.get("impact") or ""
                         repo_findings.append(finding)
                         continue
-                    is_real, impact = assess_finding(model_name, finding, profile)
+                    # Reuse assess_finding result if the same CVE already judged this run.
+                    if vid in _assess_cache:
+                        is_real, impact = _assess_cache[vid]
+                    else:
+                        is_real, impact = assess_finding(model_name, finding, profile)
+                        _assess_cache[vid] = (is_real, impact)
                     if not is_real:
                         print(f"· dropped {name} {parsed['id']} (model: not a realistic risk)")
                         continue
