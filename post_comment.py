@@ -227,7 +227,7 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short, current_
     # No "Changed files" list: GitHub's own Files-changed tab is authoritative, each finding already
     # cites its file, and the prior list showed only files-with-findings (mislabeled). `changed_files`
     # is kept in the signature for caller compatibility.
-    lines.append(f"---\n_Reviewed at `{sha_short}` by [GitZoid](https://waveassist.io/assistants/gitzoid)._")
+    lines.append(f"---\n_Reviewed at `{sha_short}` by [GitZoid](https://gitzoid.com)._")
     return "\n".join(lines)
 
 
