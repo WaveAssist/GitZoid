@@ -180,6 +180,19 @@ _SEV_LABEL = {"critical": "Critical", "high": "High", "medium": "Medium",
               "low": "Low", "unknown": "Unknown"}
 
 
+# Shared card + label styles for the finding blocks (new brand system: refined tint, thin accent
+# border, one radius, tight type scale). Red = exploitable code/access holes; slate = routine
+# dependency upgrades — the semantic distinction is deliberate (issue #4).
+_CARD_RED = ("margin:10px 0;padding:14px 16px;border:1px solid #F2D6D3;border-left:3px solid #F0564A;"
+             "border-radius:10px;background:#FDF7F6;line-height:1.5")
+_CARD_SLATE = ("margin:10px 0;padding:14px 16px;border:1px solid #E4E9EF;border-left:3px solid #64748B;"
+               "border-radius:10px;background:#F7F9FB;line-height:1.5")
+_KEV_LABEL = "<span style='color:#C0392B;font-weight:600'>Actively exploited</span>"
+_SEC_HEADER = ('font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12px;'
+               "font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#0B0B0C;"
+               "padding-bottom:10px;border-bottom:1px solid #E7E6E2")
+
+
 def _meta_line(parts):
     """Join header bits with a clean separator (no middot, no em dash)."""
     return " &nbsp;|&nbsp; ".join(p for p in parts if p)
@@ -188,34 +201,34 @@ def _meta_line(parts):
 def _finding_block(f) -> str:
     repo = html.escape(str(f.get("repo") or ""))
     sev = _SEV_LABEL.get(f.get("severity"), "")
-    kev = "<b>Actively exploited in the wild</b>" if f.get("actively_exploited") else ""
+    kev = _KEV_LABEL if f.get("actively_exploited") else ""
     impact = html.escape(str(f.get("impact") or ""))
+    meta = _meta_line([f"<b style='color:#0B0B0C'>{repo}</b>",
+                       f"<span style='color:#8A8F98'>Severity: {html.escape(sev)}</span>" if sev else "",
+                       kev])
+    meta_row = f"<div style='font-size:12px'>{meta}</div>"
     if f.get("category") == "dependency":
         pkg = html.escape(f"{f.get('name') or ''} {f.get('version') or ''}".strip())
         fix = f.get("fix") or f.get("fixed")
-        fix_line = (f"<div style='color:#1b5e20;margin-top:4px'>Fix: upgrade {html.escape(pkg.split(' ')[0])} "
+        fix_line = (f"<div style='color:#0B7E43;font-size:13px;margin-top:6px'>Fix: upgrade {html.escape(pkg.split(' ')[0])} "
                     f"to {html.escape(str(fix))}.</div>") if fix else \
-                   "<div style='color:#8a6d3b;margin-top:4px'>No fixed version is published yet.</div>"
+                   "<div style='color:#9A6B12;font-size:13px;margin-top:6px'>No fixed version is published yet.</div>"
         ref = f.get("vuln_id") or ", ".join(f.get("aliases") or [])
-        ref_line = f"<div style='color:#888;font-size:11px;margin-top:4px'>Reference: {html.escape(str(ref))}</div>" if ref else ""
-        header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
-        return (f"<div style='margin:12px 0;padding:11px 13px;border-left:4px solid #b91c1c;background:#fbf6f6'>"
-                f"<div>{header}</div>"
-                f"<div style='font-weight:600;margin-top:3px'>{pkg}</div>"
-                f"<div style='margin-top:4px'>{impact}</div>{fix_line}{ref_line}</div>")
+        ref_line = f"<div style='color:#9AA3AF;font-size:11px;margin-top:6px'>Reference: {html.escape(str(ref))}</div>" if ref else ""
+        return (f"<div style='{_CARD_RED}'>{meta_row}"
+                f"<div style='font-weight:700;font-size:14px;color:#0B0B0C;margin-top:5px'>{pkg}</div>"
+                f"<div style='font-size:13px;color:#374151;margin-top:5px'>{impact}</div>{fix_line}{ref_line}</div>")
     # code finding (authz / secret / backdoor)
     title = html.escape(str(f.get("title") or f.get("category")))
     victim = html.escape(str(f.get("named_victim") or ""))
     fix = html.escape(str(f.get("fix") or ""))
     where = html.escape(str(f.get("path") or f.get("entry_point") or ""))
-    victim_line = f"<div style='margin-top:4px'>Who is affected: {victim}</div>" if victim else ""
-    fix_line = f"<div style='color:#1b5e20;margin-top:4px'>Fix: {fix}</div>" if fix else ""
-    where_line = f"<div style='color:#888;font-size:11px;margin-top:4px'>Location: {where}</div>" if where else ""
-    header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
-    return (f"<div style='margin:12px 0;padding:11px 13px;border-left:4px solid #b91c1c;background:#fbf6f6'>"
-            f"<div>{header}</div>"
-            f"<div style='font-weight:600;margin-top:3px'>{title}</div>"
-            f"<div style='margin-top:4px'>{impact}</div>{victim_line}{fix_line}{where_line}</div>")
+    victim_line = f"<div style='font-size:13px;color:#374151;margin-top:5px'>Who is affected: {victim}</div>" if victim else ""
+    fix_line = f"<div style='color:#0B7E43;font-size:13px;margin-top:6px'>Fix: {fix}</div>" if fix else ""
+    where_line = f"<div style='color:#9AA3AF;font-size:11px;margin-top:6px'>Location: {where}</div>" if where else ""
+    return (f"<div style='{_CARD_RED}'>{meta_row}"
+            f"<div style='font-weight:700;font-size:14px;color:#0B0B0C;margin-top:5px'>{title}</div>"
+            f"<div style='font-size:13px;color:#374151;margin-top:5px'>{impact}</div>{victim_line}{fix_line}{where_line}</div>")
 
 
 def split_findings(findings):
@@ -241,7 +254,7 @@ def _section(title, findings):
     if not findings:
         return ""
     blocks = "".join(_finding_block(f) for f in findings)
-    return f"<h3 style='margin:18px 0 2px;font-size:14px;color:#374151'>{html.escape(title)}</h3>" + blocks
+    return f"<div style='{_SEC_HEADER};margin:26px 0 6px'>{html.escape(title)}</div>" + blocks
 
 
 def _max_version(versions):
@@ -264,34 +277,36 @@ def _dep_group_block(group):
     worst = by_sev[0]
     repo = html.escape(str(worst.get("repo") or ""))
     sev = _SEV_LABEL.get(worst.get("severity"), "")
-    kev = "<b>Actively exploited in the wild</b>" if any(g.get("actively_exploited") for g in group) else ""
+    kev = _KEV_LABEL if any(g.get("actively_exploited") for g in group) else ""
     name = worst.get("name") or ""
     pkg = html.escape(f"{name} {worst.get('version') or ''}".strip())
     n = len(group)
-    count_line = (f"<div style='color:#666;font-size:12px;margin-top:2px'>{n} known vulnerabilities</div>"
+    count_line = (f"<div style='color:#5F6773;font-size:12px;margin-top:3px'>{n} known vulnerabilities</div>"
                   if n > 1 else "")
     impact = html.escape(str(worst.get("impact") or worst.get("summary") or ""))
     target = _max_version([g.get("fix") or g.get("fixed") for g in group])
     if target:
         more = f" (resolves {n} advisories)" if n > 1 else ""
-        fix_line = (f"<div style='color:#1b5e20;margin-top:4px'>Fix: upgrade {html.escape(str(name))} to "
+        fix_line = (f"<div style='color:#0B7E43;font-size:13px;margin-top:6px'>Fix: upgrade {html.escape(str(name))} to "
                     f"{html.escape(str(target))} or later{more}.</div>")
     else:
-        fix_line = "<div style='color:#8a6d3b;margin-top:4px'>No fixed version is published yet.</div>"
+        fix_line = "<div style='color:#9A6B12;font-size:13px;margin-top:6px'>No fixed version is published yet.</div>"
     refs = []
     for g in group:
         r = g.get("vuln_id") or ", ".join(g.get("aliases") or [])
         if r:
             refs.append(r)
     refs = list(dict.fromkeys(refs))   # de-dupe, keep order
-    ref_line = (f"<div style='color:#9aa3af;font-size:11px;margin-top:4px'>"
+    ref_line = (f"<div style='color:#9AA3AF;font-size:11px;margin-top:6px'>"
                 f"{'References' if len(refs) > 1 else 'Reference'}: {html.escape(', '.join(refs))}</div>"
                 if refs else "")
-    header = _meta_line([f"<b>{repo}</b>", html.escape(f"Severity: {sev}") if sev else "", kev])
-    return (f"<div style='margin:10px 0;padding:11px 13px;border-left:4px solid #475569;background:#f8fafc'>"
-            f"<div style='color:#475569;font-size:13px'>{header}</div>"
-            f"<div style='font-weight:600;margin-top:3px;color:#1f2937'>{pkg}</div>{count_line}"
-            f"<div style='margin-top:4px;color:#374151'>{impact}</div>{fix_line}{ref_line}</div>")
+    meta = _meta_line([f"<b style='color:#0B0B0C'>{repo}</b>",
+                       f"<span style='color:#8A8F98'>Severity: {html.escape(sev)}</span>" if sev else "",
+                       kev])
+    return (f"<div style='{_CARD_SLATE}'>"
+            f"<div style='font-size:12px'>{meta}</div>"
+            f"<div style='font-weight:700;font-size:14px;margin-top:5px;color:#0B0B0C'>{pkg}</div>{count_line}"
+            f"<div style='font-size:13px;margin-top:5px;color:#374151'>{impact}</div>{fix_line}{ref_line}</div>")
 
 
 def _dep_section(dep_findings):
@@ -310,11 +325,10 @@ def _dep_section(dep_findings):
             order.append(k)
         groups[k].append(f)
     blocks = "".join(_dep_group_block(groups[k]) for k in order)
-    header = ("<div style='margin:20px 0 10px'>"
-              "<div style='font-size:11px;font-weight:700;letter-spacing:.08em;color:#475569;"
-              "text-transform:uppercase'>Vulnerable dependencies</div>"
-              "<div style='color:#6b7280;font-size:12px;margin-top:3px'>Known vulnerabilities in "
-              "third-party packages you depend on. The fix is to upgrade the package.</div></div>")
+    header = (f"<div style='margin:26px 0 10px'>"
+              f"<div style='{_SEC_HEADER}'>Vulnerable dependencies</div>"
+              f"<div style='color:#5F6773;font-size:12.5px;margin-top:10px;line-height:1.5'>Known vulnerabilities in "
+              f"third-party packages you depend on. The fix is to upgrade the package.</div></div>")
     return header + blocks
 
 
@@ -333,21 +347,35 @@ def build_alert_email(code_findings, dep_findings, scanned_repos):
     top (rarer, more serious), then vulnerable dependencies below. code_findings is already ranked +
     capped; dep_findings is listed in full (no cap — issue #1)."""
     n = _issue_count(code_findings + dep_findings)
-    head = (f"<div style=\"font-family:-apple-system,Segoe UI,sans-serif;padding:16px;line-height:1.5;color:#1f2937\">"
-            f"<h2 style='margin:0 0 4px;font-size:18px'>GitZoid Security Review</h2>"
-            f"<div style='color:#666;font-size:12px'>{n} issue{'s' if n != 1 else ''} found across {scanned_repos} "
-            f"repositor{'ies' if scanned_repos != 1 else 'y'}. Only real, exploitable issues are shown.</div>")
     # A thin divider separates the two sections only when BOTH are present, so a deps-only email does
     # not open with a stray rule.
     code_html = _section("Code and access issues", code_findings)
     dep_html = _dep_section(dep_findings)
-    divider = ("<div style='height:1px;background:#e5e7eb;margin:26px 0 0'></div>"
+    divider = ("<div style='height:1px;background:#E7E6E2;margin:26px 0 0'></div>"
                if code_html and dep_html else "")
     body = code_html + divider + dep_html
-    foot = ("<div style='margin-top:14px;color:#888;font-size:11px'>"
+
+    chip = ("<span style=\"display:inline-block;background:#0B0E12;border-radius:8px;padding:9px 13px\">"
+            "<span style=\"font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;"
+            "font-size:17px;font-weight:700;color:#ffffff\"><span style='color:#12C46A'>/</span>gitzoid</span></span>")
+    head = (f"{chip}"
+            f"<h1 style='margin:20px 0 0;font-size:22px;font-weight:800;letter-spacing:-0.5px;color:#0B0B0C'>Security review</h1>"
+            f"<div style='color:#5F6773;font-size:13px;margin-top:8px;line-height:1.5'>{n} issue{'s' if n != 1 else ''} "
+            f"found across {scanned_repos} repositor{'ies' if scanned_repos != 1 else 'y'}. "
+            f"Only real, exploitable issues are shown.</div>")
+    foot = ("<div style='margin-top:24px;padding-top:18px;border-top:1px solid #E7E6E2;color:#8A8F98;font-size:11px;line-height:1.6'>"
             "GitZoid stays silent unless it finds something real, and will not re-alert you about an "
-            "issue you have already seen.</div></div>")
-    return head + body + foot
+            "issue you have already seen."
+            "<div style='margin-top:12px'>"
+            "<span style=\"font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;font-size:12px;font-weight:700;color:#0B0B0C\">"
+            "<span style='color:#12C46A'>/</span>gitzoid</span> &nbsp;&middot;&nbsp; "
+            "<a href='https://gitzoid.com' style='color:#0B7E43;text-decoration:none'>gitzoid.com</a> &nbsp;&middot;&nbsp; "
+            "Built on the WaveAssist engine</div></div>")
+    inner = (f"<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;"
+             f"font-size:14px;line-height:1.5;color:#1f2937\">{head}{body}{foot}</div>")
+    return (f"<div style='background:#F2F3F1;padding:24px 16px'>"
+            f"<div style='max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #E7E6E2;"
+            f"border-radius:14px;padding:30px 30px 26px'>{inner}</div></div>")
 
 
 def build_subject(findings):

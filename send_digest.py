@@ -96,27 +96,28 @@ def render_security_rollup_html(rollup) -> str:
     rollup = rollup or {}
     counts = rollup.get("counts", {"new": 0, "still_open": 0, "resolved": 0})
 
-    def line(item):
-        kev = " <span class='kev'>actively exploited</span>" if item.get("actively_exploited") else ""
+    def row(item):
+        kev = " <span class='kev'>&middot; actively exploited</span>" if item.get("actively_exploited") else ""
         sev = _SEV_LABEL.get(item.get("severity"), "")
         n = item.get("count", 1)
         adv = f", {n} advisories" if n and n > 1 else ""
-        return (f"<li><b>{_esc(item.get('title'))}</b> "
-                f"<span class='muted'>({_esc(item.get('repo'))}{', ' + sev if sev else ''}{adv})</span>{kev}</li>")
+        meta = f"{_esc(item.get('repo'))}{', ' + sev if sev else ''}{adv}"
+        return (f"<div class='sec-row'><span class='sec-title'>{_esc(item.get('title'))}</span> "
+                f"<span class='muted'>&middot; {meta}</span>{kev}</div>")
+
+    def group(label, items):
+        return (f"<div class='sec-group-label'>{label}</div>" + "".join(row(i) for i in items)) if items else ""
 
     if not (counts.get("new") or counts.get("still_open") or counts.get("resolved")):
         body = ("<p class='success'>No security issues found this week. GitZoid watched your dependencies "
                 "and code and found nothing exploitable.</p>")
     else:
-        body = (f"<p class='muted'>{counts.get('new', 0)} new, {counts.get('still_open', 0)} still open, "
-                f"{counts.get('resolved', 0)} resolved this week.</p>")
-        if rollup.get("new"):
-            body += "<h3>New this week</h3><ul>" + "".join(line(i) for i in rollup["new"]) + "</ul>"
-        if rollup.get("still_open"):
-            body += "<h3>Still open</h3><ul>" + "".join(line(i) for i in rollup["still_open"]) + "</ul>"
-        if rollup.get("resolved"):
-            body += "<h3>Resolved this week</h3><ul>" + "".join(line(i) for i in rollup["resolved"]) + "</ul>"
-    return f"<h2>🔒 SECURITY</h2>{body}"
+        body = (f"<div class='sec-intro'>{counts.get('new', 0)} new, {counts.get('still_open', 0)} still open, "
+                f"{counts.get('resolved', 0)} resolved this week.</div>")
+        body += group("New this week", rollup.get("new"))
+        body += group("Still open", rollup.get("still_open"))
+        body += group("Resolved this week", rollup.get("resolved"))
+    return f"<h2>Security</h2>{body}"
 
 
 def digest_title(group_name, implicit=False) -> str:
@@ -150,36 +151,45 @@ def pdf_filename(group_name, now=None) -> str:
 
 
 _STYLE = """
-body { font-family: Inter, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; color: #0f172a; margin: 18px; }
-.container { max-width: 700px; margin: 0 auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; border-top: 4px solid #1ED66C; overflow: hidden; }
-.header { padding: 14px; border-bottom: 1px solid #e5e7eb; }
-.header h1 { margin: 0; font-size: 22px; color: #0f1116; }
-.subtitle { color: #6b7280; font-size: 12px; margin-top: 6px; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif; color: #0B0B0C; margin: 0; padding: 0; background: #F2F3F1; }
+.container { max-width: 640px; margin: 24px auto; background: #ffffff; border-radius: 14px; border: 1px solid #E7E6E2; overflow: hidden; }
+.header { padding: 30px 34px 0 34px; }
+.chip { display: inline-block; background: #0B0E12; border-radius: 8px; padding: 9px 13px; }
+.chip-wm { font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 17px; font-weight: 700; letter-spacing: -0.5px; color: #ffffff; }
+.chip-slash { color: #12C46A; }
+.header h1 { margin: 20px 0 0 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; color: #0B0B0C; line-height: 1.15; }
+.subtitle { color: #5F6773; font-size: 12px; margin-top: 8px; }
 /* Table, not flexbox: WeasyPrint (PDF) and email clients render flex unreliably and wrap the 4 stats;
    a 4-column table keeps them on one row everywhere. */
-.stats-bar { width: 100%; border-collapse: collapse; border-bottom: 1px solid #e5e7eb; }
-.stats-bar td { width: 25%; text-align: center; padding: 16px 6px; vertical-align: top; }
-.stat-value { font-size: 24px; font-weight: 700; color: #1ED66C; }
-.stat-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
-.content { padding: 14px; }
-h2 { color: #0f1116; font-size: 20px; margin-top: 28px; padding: 10px 0 10px 12px; border-left: 4px solid #1ED66C; border-bottom: 1px solid #e5e7eb; }
-h2:first-child { margin-top: 0; }
-h3 { color: #0f1116; font-size: 14px; margin: 14px 0 8px 0; }
-h4 { color: #0f1116; font-size: 14px; margin: 0 0 4px 0; }
-p { margin: 8px 0; line-height: 1.45; }
-ul { margin: 6px 0 10px 18px; padding: 0; }
-li { margin: 4px 0; line-height: 1.45; }
-.summary-box { padding: 12px; border-radius: 8px; border: 1px solid #e5e7eb; border-left: 3px solid #1ED66C; margin-bottom: 20px; }
-.repo-card { padding: 12px; border-radius: 12px; border: 1px solid #e5e7eb; border-left: 3px solid #1ED66C; margin: 10px 0; }
-.repo-status { color: #6b7280; font-weight: normal; font-size: 12px; }
-.muted { color: #6b7280; font-size: 12px; }
-.success { color: #148F47; font-weight: 500; }
-.kev { color: #b91c1c; font-weight: 600; font-size: 12px; }
-.poem { background: #f9fafb; padding: 16px; border-radius: 8px; border-left: 3px solid #1ED66C; margin: 20px 0; }
+.stats-bar { width: 100%; border-collapse: collapse; margin-top: 24px; border-top: 1px solid #E7E6E2; border-bottom: 1px solid #E7E6E2; }
+.stats-bar td { width: 25%; text-align: center; padding: 18px 6px; vertical-align: top; }
+.stat-value { font-size: 26px; font-weight: 800; color: #12C46A; }
+.stat-label { font-size: 10px; color: #5F6773; text-transform: uppercase; letter-spacing: 1px; font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+.content { padding: 6px 34px 0 34px; }
+h2 { color: #0B0B0C; font-size: 12px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin: 30px 0 0 0; padding: 0 0 12px 0; border-bottom: 1px solid #E7E6E2; font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+h2:first-child { margin-top: 6px; }
+h3 { color: #0B0B0C; font-size: 14px; margin: 16px 0 8px 0; }
+h4 { color: #0B0B0C; font-size: 14px; margin: 0 0 4px 0; }
+p { margin: 10px 0; line-height: 1.55; color: #2B2F36; }
+ul { margin: 8px 0 12px 18px; padding: 0; }
+li { margin: 5px 0; line-height: 1.55; color: #2B2F36; }
+.summary-box { padding: 14px 16px; border-radius: 10px; background: #F7F8F6; border: 1px solid #E7E6E2; border-left: 3px solid #12C46A; margin: 14px 0 20px; }
+.repo-card { padding: 13px 15px; border-radius: 10px; border: 1px solid #E7E6E2; border-left: 3px solid #12C46A; margin: 10px 0; }
+.repo-status { color: #5F6773; font-weight: normal; font-size: 12px; }
+.muted { color: #5F6773; font-size: 12px; }
+.success { color: #0B7E43; font-weight: 500; }
+.kev { color: #C0392B; font-weight: 600; white-space: nowrap; }
+.sec-intro { font-size: 12.5px; color: #5F6773; margin: 6px 0 4px; }
+.sec-group-label { font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #5F6773; margin: 18px 0 8px; }
+.sec-row { font-size: 13px; line-height: 1.5; color: #2B2F36; padding: 7px 0; border-top: 1px solid #EEEFEB; }
+.sec-title { font-weight: 700; color: #0B0B0C; }
+.poem { background: #F7F8F6; padding: 16px; border-radius: 10px; border-left: 3px solid #12C46A; margin: 20px 0; }
 .poem-line { margin: 2px 0; color: #374151; font-style: italic; }
-.footer { text-align: center; padding: 20px; border-top: 1px solid #e5e7eb; }
-.footer p { margin: 4px 0; font-size: 12px; color: #6b7280; }
-@page { margin: 0.75in; size: letter; }
+.footer { text-align: center; padding: 26px 34px 30px; border-top: 1px solid #E7E6E2; margin-top: 26px; }
+.footer .fwm { font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 700; color: #0B0B0C; }
+.footer p { margin: 8px 0 0; font-size: 11px; color: #8A8F98; }
+.footer a { color: #0B7E43; text-decoration: none; }
+@page { margin: 0.6in; size: letter; }
 """
 
 
@@ -219,7 +229,7 @@ def build_email_html(group_name, business_report, technical_report, stats, date_
 
     return f"""<html><head><meta charset="utf-8" /><style>{_STYLE}</style></head><body>
 <div class="container">
-  <div class="header"><h1>{_esc(digest_title(group_name, implicit))}</h1>{period}</div>
+  <div class="header"><span class="chip"><span class="chip-wm"><span class="chip-slash">/</span>gitzoid</span></span><h1>{_esc(digest_title(group_name, implicit))}</h1>{period}</div>
   <table class="stats-bar" role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>
     <td><div class="stat-value">{stats.get('commits', 0)}</div><div class="stat-label">Commits</div></td>
     <td><div class="stat-value">{stats.get('contributors', 0)}</div><div class="stat-label">Contributors</div></td>
@@ -227,16 +237,16 @@ def build_email_html(group_name, business_report, technical_report, stats, date_
     <td><div class="stat-value">{stats.get('active_repos', 0)}</div><div class="stat-label">Active Repos</div></td>
   </tr></table>
   <div class="content">
-    <h2>SUMMARY</h2><div class="summary-box"><p>{_esc(summary)}</p></div>
-    <h2>🚀 PRIMARY UPDATES</h2>{_ul(features)}
-    <h2>🛠️ REPOSITORY DEEP DIVE</h2>{repo_html}
+    <h2>Summary</h2><div class="summary-box"><p>{_esc(summary)}</p></div>
+    <h2>Primary updates</h2>{_ul(features)}
+    <h2>Repository deep dive</h2>{repo_html}
     {rollup_html}
     {poem_divider}
     {poem_html}
   </div>
   <div class="footer">
-    <p>Generated by <a href="https://gitzoid.com" style="color:#1ED66C;text-decoration:none;">GitZoid</a>
-       · Powered by <a href="https://waveassist.io" style="color:#1ED66C;text-decoration:none;">WaveAssist</a></p>
+    <span class="fwm"><span style="color:#12C46A;">/</span>gitzoid</span>
+    <p><a href="https://gitzoid.com">gitzoid.com</a> &nbsp;&middot;&nbsp; Built on the WaveAssist engine</p>
     <p class="muted">A PDF version is attached for easy sharing and printing.</p>
   </div>
 </div></body></html>"""

@@ -66,6 +66,11 @@ def _rid(r):
 full_repos = _real_fetch("github_selected_resources", default=[]) or []
 _store["github_selected_resources"] = [r for r in full_repos if _rid(r) == TARGET] or [{"id": TARGET, "properties": {}}]
 
+# Inject GH token from env if provided (overrides project-stored token; useful for test accounts).
+_gh_token = os.environ.get("GH_TOKEN") or ""
+if _gh_token:
+    _store["github_access_token"] = _gh_token
+
 waveassist.call_llm = _local_call_llm
 waveassist.fetch_data = _fetch
 waveassist.store_data = _store_data
