@@ -25,6 +25,11 @@ VERDICT_HEAD = {
 _CAT_ICON = {"bug": "🐛", "security": "🔒", "optimization": "🚀", "suggestion": "💡"}
 _CAT_NAME = {"bug": "Bug", "security": "Security", "optimization": "Optimization", "suggestion": "Suggestion"}
 INTRO = "_Here's an automated AI-generated review to support your development workflow._"
+# The summary footer is our highest-volume owned surface (100K+ PR interactions). UTM-tagged so the
+# clicks read as a channel in GA4/PostHog instead of arriving as untagged direct traffic. Values are
+# fixed and lowercase: analytics treats UTMs as case-sensitive strings, so never vary the casing.
+FOOTER_URL = ("https://gitzoid.com/?utm_source=pr-footer&utm_medium=github-comment"
+              "&utm_campaign=footer-flip")
 
 OUTPUT_LINK_STYLE = ("color: #1b5e20; font-weight: 600; text-decoration: underline; text-underline-offset: 3px;")
 OUTPUT_URL_HINT_STYLE = "display: block; margin-top: 6px; font-size: 11px; color: #5a6c5d;"
@@ -227,7 +232,7 @@ def build_summary_md(review, findings_ledger, changed_files, sha_short, current_
     # No "Changed files" list: GitHub's own Files-changed tab is authoritative, each finding already
     # cites its file, and the prior list showed only files-with-findings (mislabeled). `changed_files`
     # is kept in the signature for caller compatibility.
-    lines.append(f"---\n_Reviewed at `{sha_short}` by [GitZoid](https://gitzoid.com)._")
+    lines.append(f"---\n_Reviewed at `{sha_short}` by [GitZoid]({FOOTER_URL})._")
     return "\n".join(lines)
 
 
