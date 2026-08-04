@@ -495,24 +495,29 @@ class TestIssueCountGrouped:
 
 
 class TestSubjectMultiRepo:
-    """Fix D: when findings span multiple repos the subject must not name just one repo."""
+    """The subject is generic and count-only: it never names a repo (names are long/random and ugly
+    in a subject) and never states a repo/group count (each group emails only its own slice, so a
+    count reads as misleading), regardless of how many repos the findings span."""
 
     def _f(self, repo, sev="high", **kw):
         return {"category": "authz", "repo": repo, "title": f"bug in {repo}",
                 "severity": sev, "impact": "x", **kw}
 
-    def test_single_repo_names_the_repo(self):
+    def test_single_repo_is_not_named(self):
         s = build_subject([self._f("o/r")])
-        assert "in o/r" in s
+        assert s == "GitZoid Security: 1 issue found"
+        assert "o/r" not in s
 
-    def test_multi_repo_says_count_of_repos(self):
+    def test_multi_repo_does_not_count_repos(self):
         s = build_subject([self._f("o/a"), self._f("o/b")])
-        assert "2 repositories" in s
-        assert "GitZoid Security" in s
+        assert s == "GitZoid Security: 2 issues found"
+        assert "repositories" not in s
+        assert "o/a" not in s and "o/b" not in s
 
-    def test_kev_multi_repo_mentions_more(self):
+    def test_kev_does_not_change_the_subject(self):
         s = build_subject([self._f("o/a", actively_exploited=True), self._f("o/b")])
-        assert "actively exploited" in s and "more" in s
+        assert s == "GitZoid Security: 2 issues found"
+        assert "actively exploited" not in s
 
 
 # ---------------------------------------------------------------- group routing (per-group delivery)

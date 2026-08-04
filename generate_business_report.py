@@ -25,7 +25,6 @@ print("GitZoid Digest: starting business report generation (generate_business_re
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
-TEMPERATURE = 0.4
 
 
 class BusinessReport(BaseModel):
@@ -181,7 +180,7 @@ if groups:
                               brain_block(profiles))
         try:
             result = waveassist.call_llm(model=model_name, prompt=prompt, response_model=BusinessReport,
-                                         max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+                                         max_tokens=MAX_TOKENS)
         except Exception as e:
             print(f"⚠️ business LLM failed for {slug}: {e}")
             result = None

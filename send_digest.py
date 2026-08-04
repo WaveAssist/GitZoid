@@ -92,9 +92,17 @@ def render_group_preview(group_name, recipients, sent, body_html):
 
 
 def render_security_rollup_html(rollup) -> str:
-    """The 'we watched, here is the state' section. Always rendered, even at zero (that IS the value)."""
+    """The 'we watched, here is the state' section. When Security Watch HAS scanned this group's repos,
+    it always renders even at zero — the clean-week all-clear is the value. But before any scan has
+    happened (first digest firing before Security Watch has run, or a digest group whose repos no
+    security group covers), an empty roll-up is NOT an all-clear — claiming 'nothing found' then would
+    contradict the very first security alert email. In that case the section is hidden entirely until a
+    scan genuinely happens (`scanned` set by generate_technical_report)."""
     rollup = rollup or {}
     counts = rollup.get("counts", {"new": 0, "still_open": 0, "resolved": 0})
+    all_zero = not (counts.get("new") or counts.get("still_open") or counts.get("resolved"))
+    if all_zero and not rollup.get("scanned"):
+        return ""
 
     def row(item):
         kev = " <span class='kev'>&middot; actively exploited</span>" if item.get("actively_exploited") else ""
@@ -108,7 +116,7 @@ def render_security_rollup_html(rollup) -> str:
     def group(label, items):
         return (f"<div class='sec-group-label'>{label}</div>" + "".join(row(i) for i in items)) if items else ""
 
-    if not (counts.get("new") or counts.get("still_open") or counts.get("resolved")):
+    if all_zero:                       # scanned this week (guaranteed by the guard above) and clean
         body = ("<p class='success'>No security issues found this week. GitZoid watched your dependencies "
                 "and code and found nothing exploitable.</p>")
     else:
@@ -219,8 +227,10 @@ def build_email_html(group_name, business_report, technical_report, stats, date_
         poem_html = ("<div class='poem'><h3>A small poem for this week:</h3><em>"
                      + "".join(f"<p class='poem-line'>{_esc(l)}</p>" for l in poem) + "</em></div>")
         # Separate the poem from the security section above it (on a clean week the short "nothing
-        # found" line otherwise runs straight into the poem).
-        poem_divider = "<hr style='border:0;border-top:1px solid #e5e7eb;margin:22px 0' />"
+        # found" line otherwise runs straight into the poem). Only when that section is actually
+        # present — if the roll-up is hidden (not scanned yet) the divider would dangle.
+        if rollup_html:
+            poem_divider = "<hr style='border:0;border-top:1px solid #e5e7eb;margin:22px 0' />"
 
     period = ""
     if date_range and date_range.get("start_date_formatted"):

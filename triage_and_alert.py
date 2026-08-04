@@ -379,16 +379,12 @@ def build_alert_email(code_findings, dep_findings, scanned_repos):
 
 
 def build_subject(findings):
-    top = findings[0]
-    repos = {f.get("repo") for f in findings if f.get("repo")}
-    multi = len(repos) > 1
+    # One generic, count-only subject every time — no repo names (long/random, ugly in a subject),
+    # no repo/group count (each group emails its own slice, so a count reads as misleading), and no
+    # KEV special-case (urgency is flagged inside the email). Matches the body header's "issues found"
+    # wording so subject and body speak the same language.
     n = _issue_count(findings)              # count grouped issues (a package = 1), not raw CVEs
-    count = f"{n} issues" if n != 1 else "1 issue"
-    if top.get("actively_exploited"):
-        where = (top.get("repo") or "your repos") + (f" and {len(repos) - 1} more" if multi else "")
-        return f"GitZoid Security: actively exploited issue in {where}"
-    where = f"{len(repos)} repositories" if multi else (top.get("repo") or "your repos")
-    return f"GitZoid Security: {count} in {where}"
+    return f"GitZoid Security: {n} issue{'s' if n != 1 else ''} found"
 
 
 # ---------------------------------------------------------------- group routing (per-group delivery)

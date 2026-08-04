@@ -56,10 +56,23 @@ class TestRenderSecurityRollup:
         assert "SQLi" in h
         assert "patched dep" in h
 
-    def test_clean_week_message(self):
+    def test_clean_week_message_when_scanned(self):
+        # scanned + zero findings = a genuine all-clear -> the reassurance line ships.
+        h = render_security_rollup_html({"new": [], "still_open": [], "resolved": [], "scanned": True,
+                                         "counts": {"new": 0, "still_open": 0, "resolved": 0}})
+        assert "no security issues found" in h.lower()   # reassurance, not blank
+        assert "<h2>Security</h2>" in h
+
+    def test_hidden_when_not_scanned_yet(self):
+        # zero findings but NOT yet scanned (e.g. first run before Security Watch has run) = 'not
+        # scanned', not an all-clear -> hide the section rather than post a false 'nothing found'.
         h = render_security_rollup_html({"new": [], "still_open": [], "resolved": [],
                                          "counts": {"new": 0, "still_open": 0, "resolved": 0}})
-        assert "no" in h.lower()               # reassurance, not blank
+        assert h == ""
+
+    def test_findings_always_render_regardless_of_scanned_flag(self):
+        # A non-empty roll-up was obviously scanned; render it even if the flag is missing.
+        assert "SQLi" in render_security_rollup_html(ROLLUP)
 
 
 class TestGroupGenerationFailed:
@@ -343,10 +356,11 @@ class TestSecurityPoemDivider:
     def test_divider_sits_between_security_and_poem(self):
         business = {"executive_summary": "a quiet week", "shipped_features": []}
         technical = {"repository_deep_dive": [], "poem": ["line one", "line two"],
-                     "security_rollup": {"counts": {"new": 0, "still_open": 0, "resolved": 0}}}
+                     "security_rollup": {"scanned": True,
+                                         "counts": {"new": 0, "still_open": 0, "resolved": 0}}}
         html = build_email_html("All repositories", business, technical, {"commits": 0}, {})
         assert "<hr" in html
-        sec = html.index("SECURITY")
+        sec = html.index("<h2>Security</h2>")
         poem = html.index("A small poem")
         hr = html.index("<hr", sec)
         assert sec < hr < poem            # divider between the security section and the poem
@@ -354,10 +368,21 @@ class TestSecurityPoemDivider:
     def test_no_dangling_divider_without_poem(self):
         business = {"executive_summary": "s", "shipped_features": []}
         technical = {"repository_deep_dive": [], "poem": [],
-                     "security_rollup": {"counts": {"new": 0, "still_open": 0, "resolved": 0}}}
+                     "security_rollup": {"scanned": True,
+                                         "counts": {"new": 0, "still_open": 0, "resolved": 0}}}
         html = build_email_html("All repositories", business, technical, {"commits": 0}, {})
         assert "A small poem" not in html
         assert "<hr" not in html           # no poem -> no divider
+
+    def test_no_divider_when_security_section_hidden(self):
+        # Not scanned yet -> security section hidden -> the poem divider must not dangle above the poem.
+        business = {"executive_summary": "s", "shipped_features": []}
+        technical = {"repository_deep_dive": [], "poem": ["line one", "line two"],
+                     "security_rollup": {"counts": {"new": 0, "still_open": 0, "resolved": 0}}}
+        html = build_email_html("All repositories", business, technical, {"commits": 0}, {})
+        assert "<h2>Security</h2>" not in html   # section hidden
+        assert "A small poem" in html            # poem still present
+        assert "<hr" not in html                 # no security section -> no divider
 
 
 class TestDigestStatus:
