@@ -24,7 +24,6 @@ print("GitZoid Digest: starting technical report generation (generate_technical_
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
-TEMPERATURE = 0.4
 ROLLUP_WINDOW_DAYS = 7
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
 
@@ -150,6 +149,20 @@ def security_rollup(ledger, group_repos, now, days=ROLLUP_WINDOW_DAYS):
             "counts": {"new": len(new), "still_open": len(still_open), "resolved": len(resolved)}}
 
 
+def group_scanned(group_repos):
+    """True iff Security Watch has actually scanned at least one of this group's repos — i.e. a
+    `dependency_snapshot:{repo}` exists (scan_dependencies writes one for every repo it processes).
+    An empty roll-up then means one of two very different things: a genuine clean week (scanned,
+    found nothing) OR 'not scanned yet' (e.g. the very first digest firing before Security Watch has
+    run, or a digest-group repo that no security group covers). Only the former is a trustworthy
+    all-clear; the latter is a false one that would contradict the first security alert email. This
+    flag lets send_digest hide the section until a scan has genuinely happened."""
+    for r in (group_repos or []):
+        if waveassist.fetch_data(f"dependency_snapshot:{r}", default=None):
+            return True
+    return False
+
+
 def build_prompt(project_name, changes_context, business_report_context, brain_context) -> str:
     parts = [
         ("You are a technical advisor reporting to a busy CTO. "
@@ -211,6 +224,7 @@ if groups:
         repos = group.get("repos") or []
         analyses = filter_analyses(repository_analyses, repos)
         rollup = security_rollup(ledger, repos, now)
+        rollup["scanned"] = group_scanned(repos)   # distinguishes a real clean week from 'not scanned yet'
 
         if count_changes(analyses) == 0:
             # Quiet code week, but the security roll-up still ships the reassurance. No LLM needed.
@@ -230,7 +244,7 @@ if groups:
                               brain_block(profiles))
         try:
             result = waveassist.call_llm(model=model_name, prompt=prompt, response_model=TechnicalReport,
-                                         max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+                                         max_tokens=MAX_TOKENS)
         except Exception as e:
             print(f"⚠️ technical LLM failed for {slug}: {e}")
             result = None

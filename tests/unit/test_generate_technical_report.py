@@ -138,6 +138,25 @@ class TestDriver:
         assert "security_rollup" in reports["idle"]            # reassurance present even when quiet
         assert reports["idle"]["security_rollup"]["counts"]["new"] == 1
 
+    def test_rollup_scanned_flag_tracks_dependency_snapshot(self, monkeypatch):
+        """The roll-up carries scanned=True iff Security Watch has scanned a group repo (a
+        dependency_snapshot exists), so send_digest can tell a real clean week from 'not scanned yet'."""
+        groups = [{"name": "Idle", "repos": ["o/a"], "recipients": [], "slug": "idle"}]
+        base = {
+            "digest_skip_run": "0",
+            "digest_resolved_groups": groups,
+            "repository_analyses": [{"repository": "o/a", "changes": []}],
+            "digest_business_reports": {},
+            "security_findings": {},
+        }
+        no_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM for a quiet group"))
+
+        not_scanned = self._run(monkeypatch, dict(base), llm=no_llm)
+        assert not_scanned["digest_technical_reports"]["idle"]["security_rollup"]["scanned"] is False
+
+        scanned = self._run(monkeypatch, {**base, "dependency_snapshot:o/a": {"hash": "abc"}}, llm=no_llm)
+        assert scanned["digest_technical_reports"]["idle"]["security_rollup"]["scanned"] is True
+
     def test_quiet_group_not_flagged_failed(self, monkeypatch):
         """A quiet week keeps the QUIET poem and is NOT flagged as a generation failure."""
         groups = [{"name": "Idle", "repos": ["o/a"], "recipients": [], "slug": "idle"}]

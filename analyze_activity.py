@@ -36,7 +36,6 @@ print("GitZoid Digest: starting repository activity analysis (analyze_activity) 
 # Haiku to save credits and shorten the (slow, per-repo) digest run.
 DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 MAX_TOKENS = 8000   # reasoning/"pro" models spend this on hidden reasoning too
-TEMPERATURE = 0.4
 RATE_SLEEP = 0.5
 HTTP_TIMEOUT = 20
 GITHUB_API = "https://api.github.com"
@@ -241,7 +240,7 @@ Guidelines:
     for i in range(attempts):
         try:
             return waveassist.call_llm(model=model_name, prompt=prompt, response_model=RepositoryAnalysis,
-                                       max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+                                       max_tokens=MAX_TOKENS)
         except Exception as e:
             print(f"⚠️ analysis LLM attempt {i + 1}/{attempts} failed for {repo_path}: {e}")
             if i < attempts - 1:
