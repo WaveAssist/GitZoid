@@ -19,7 +19,11 @@ MAX_REVIEW_MD_CHARS = 6000        # caps each block so it never crowds out the d
 MAX_CONVENTIONS_CHARS = 6000
 MAX_COMMENTS_CHARS = 8000
 MAX_COMMENTS = 30                 # newest N comments kept before the char cap
+MAX_FOCUS_ITEMS = 20
+MAX_FOCUS_ITEM_CHARS = 200        # cap each focus string so a control list can't bloat the prompt
 REVIEW_FETCH_TIMEOUT = 10
+REVIEW_CONFIG_TTL_SECONDS = 3600  # cache per-repo review config so we don't re-probe GitHub every
+                                  # 2-min run; controls (skip/ignore/...) take effect within ~1h
 SKIP_LABEL = "gitzoid-skip"       # a PR carrying this label is not reviewed
 # Bot logins whose comments are noise in the "existing discussion" context (mirrors is_bot_pr).
 _COMMENT_BOT_LOGINS = {
@@ -182,14 +186,21 @@ def fetch_repo_file(repo_path: str, path: str, access_token: str) -> str:
         return ""
 
 
+def _strip_yaml_comment(val: str) -> str:
+    """Drop an inline ' # comment' from a scalar/list value (a bare '#' inside a token is kept)."""
+    i = val.find(" #")
+    return (val[:i] if i != -1 else val).strip()
+
+
 def parse_review_md(text: str):
     """Split optional leading YAML-ish front-matter from the prose body.
 
-    Returns (control: dict, body: str). Front-matter is the block between a leading '---' line
-    and the next '---' line. Only keys we understand are parsed — skip (bool), severity_floor
-    (high|medium|low), ignore[] (globs), focus[] (strings); everything else is ignored. No YAML
-    dependency: a tiny line parser for our fixed, simple schema. Malformed front-matter degrades
-    to treating the whole file as prose."""
+    Returns (control: dict, body: str). Front-matter is the block between a leading '---' line and
+    the next '---' line. Only TOP-LEVEL keys we understand are parsed — skip (bool), severity_floor
+    (high|medium|low), ignore[] (globs), focus[] (strings). Indented/nested keys, full-line and
+    inline '#' comments, and anything else are ignored (so e.g. `metadata:\\n  skip: true` does NOT
+    trip the repo opt-out). No YAML dependency: a tiny line parser for our fixed, simple schema.
+    Malformed front-matter degrades to treating the whole file as prose."""
     control = {}
     if not text:
         return control, ""
@@ -202,20 +213,22 @@ def parse_review_md(text: str):
     body = "\n".join(lines[end + 1:]).strip()
     cur_list_key = None
     for raw in lines[1:end]:
-        if not raw.strip():
-            continue
         stripped = raw.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue                                    # blank line or full-line comment
         if cur_list_key and stripped.startswith("- "):
-            item = stripped[2:].strip().strip("'\"")
+            item = _strip_yaml_comment(stripped[2:]).strip("'\"")
             if item:
                 control[cur_list_key].append(item)
             continue
         cur_list_key = None
+        if raw != stripped:
+            continue                                    # indented → nested under an unknown key; ignore
         if ":" not in raw:
             continue
         key, _, val = raw.partition(":")
         key = key.strip().lower()
-        val = val.strip().strip("'\"")
+        val = _strip_yaml_comment(val.strip()).strip("'\"")
         if key in ("ignore", "focus"):
             if val:  # inline list form: "ignore: [a, b]" or a single value
                 control[key] = [v.strip().strip("'\"") for v in val.strip("[]").split(",") if v.strip()]
@@ -230,13 +243,27 @@ def parse_review_md(text: str):
 
 
 def fetch_review_config(repo_path: str, access_token: str) -> dict:
-    """Per-repo review guidance pulled from the TARGET repo (fail open to empty).
+    """Per-repo review guidance pulled from the TARGET repo's DEFAULT branch (fail open to empty),
+    cached in WaveAssist for REVIEW_CONFIG_TTL_SECONDS so we don't re-probe GitHub on every ~2-min
+    run. (The default branch is used, not each PR's base branch, to keep this ONE fetch per repo;
+    PRs into non-default branches therefore see the default branch's policy — an accepted trade-off.)
 
     - review.md (`.gitzoid/review.md` preferred, then `review.md`): optional front-matter control
       fields + free-text instructions.
     - conventions (`CLAUDE.md` preferred, then `AGENTS.md`): prose, injected as context.
     Returns instructions / focus[] / conventions (all capped) plus control fields skip /
     severity_floor / ignore[], and *_source for logging."""
+    cache_key = f"review_config:{repo_path}"
+    cached = waveassist.fetch_data(cache_key, default=None)
+    if isinstance(cached, dict) and isinstance(cached.get("cfg"), dict) and cached.get("fetched_at"):
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+            if 0 <= age < REVIEW_CONFIG_TTL_SECONDS:
+                return cached["cfg"]
+        except Exception:
+            pass
+
     cfg = {"instructions": "", "focus": [], "conventions": "", "skip": False,
            "severity_floor": "", "ignore": [], "source": "", "conventions_source": ""}
     for p in REVIEW_MD_PATHS:
@@ -244,7 +271,7 @@ def fetch_review_config(repo_path: str, access_token: str) -> dict:
         if text.strip():
             control, body = parse_review_md(text)
             cfg["instructions"] = _cap_text(body, MAX_REVIEW_MD_CHARS, "review.md")
-            cfg["focus"] = [f for f in (control.get("focus") or []) if f][:20]
+            cfg["focus"] = [f[:MAX_FOCUS_ITEM_CHARS] for f in (control.get("focus") or []) if f][:MAX_FOCUS_ITEMS]
             cfg["ignore"] = [g for g in (control.get("ignore") or []) if g][:50]
             cfg["skip"] = bool(control.get("skip"))
             cfg["severity_floor"] = control.get("severity_floor") or ""
@@ -256,19 +283,27 @@ def fetch_review_config(repo_path: str, access_token: str) -> dict:
             cfg["conventions"] = _cap_text(text, MAX_CONVENTIONS_CHARS, p)
             cfg["conventions_source"] = p
             break
+
+    try:
+        waveassist.store_data(cache_key,
+                              {"fetched_at": datetime.now(timezone.utc).isoformat(), "cfg": cfg})
+    except Exception:
+        pass
     return cfg
 
 
 def _matches_glob(path: str, glob: str) -> bool:
-    """True if `path` matches `glob` by full path or basename, or falls under a 'dir/' / 'dir/**' prefix."""
+    """Does `path` match `glob`? An explicit directory form — `dir/` or `dir/**` — matches that whole
+    subtree; anything else is an fnmatch on the full path OR the basename (note: fnmatch `*` matches
+    across `/`, so `docs/*.md` also matches `docs/api/x.md`; use an exact path for a single file).
+    A bare literal like `docs` matches only a file/dir named exactly `docs`, NOT the subtree."""
     if not path or not glob:
         return False
-    if fnmatch.fnmatch(path, glob) or fnmatch.fnmatch(path.split("/")[-1], glob):
-        return True
-    g = glob.rstrip("/")
-    if g.endswith("/**"):
-        g = g[:-3]
-    return path == g or path.startswith(g + "/")
+    if glob.endswith("/**") or glob.endswith("/"):
+        d = glob[:-3] if glob.endswith("/**") else glob
+        d = d.rstrip("/")
+        return bool(d) and (path == d or path.startswith(d + "/"))
+    return fnmatch.fnmatch(path, glob) or fnmatch.fnmatch(path.split("/")[-1], glob)
 
 
 def apply_ignore_globs(files: list, globs: list) -> list:
@@ -324,6 +359,15 @@ def fetch_pr_comments(repo_path: str, pr_number: int, headers: dict) -> str:
     collected.sort(key=lambda x: x[0], reverse=True)   # newest first
     text = "\n".join(line for _, line in collected[:MAX_COMMENTS])
     return _cap_text(text, MAX_COMMENTS_CHARS, "comments")
+
+
+def _fetch_reviewable_files(repo_path, pr_number, headers, ignore_globs):
+    """Fetch a PR's changed files and drop ignored ones. Returns (files, all_ignored): all_ignored
+    is True ONLY when the PR had changed files but every one matched an ignore glob — distinct from
+    an empty fetch (no files / transient API error), which must NOT be recorded as skipped."""
+    raw = fetch_pr_files(repo_path, pr_number, headers)
+    files = apply_ignore_globs(raw, ignore_globs)
+    return files, (bool(raw) and not files)
 
 
 def build_pr_data(
@@ -461,8 +505,15 @@ def fetch_and_process_prs(
                 # First run: Process first 2, mark rest as skipped
                 if processed_count < FIRST_RUN_LIMIT:
                     # Process this PR
-                    processed_files = apply_ignore_globs(
-                        fetch_pr_files(repo_path, pr_number, headers), ignore_globs)
+                    processed_files, all_ignored = _fetch_reviewable_files(
+                        repo_path, pr_number, headers, ignore_globs)
+                    if all_ignored:
+                        # Every changed file is ignored by review.md globs. Record it so we don't
+                        # re-fetch it every run (and so this repo can leave first-run state).
+                        reviewed_prs[pr_key] = {"status": "skipped",
+                                                "skipped_at": datetime.now(timezone.utc).isoformat()}
+                        reviewed_prs_changed = True
+                        continue
                     if processed_files:
                         pr_data = build_pr_data(
                             pr, processed_files, "full", head_sha, repo_path,
@@ -496,9 +547,14 @@ def fetch_and_process_prs(
                             # Re-review the FULL current PR (not just stored_sha..head_sha) so the
                             # open/fixed ledger reflects the real current state — an issue counts as
                             # fixed only when it is truly gone, not merely outside the latest commit.
-                            full_files = apply_ignore_globs(
-                                fetch_pr_files(repo_path, pr_number, headers), ignore_globs)
-
+                            full_files, all_ignored = _fetch_reviewable_files(
+                                repo_path, pr_number, headers, ignore_globs)
+                            if all_ignored:
+                                # New commits touch only ignored files: acknowledge the SHA so we
+                                # don't re-detect this "change" every run; keep the prior review.
+                                pr_info["last_reviewed_sha"] = head_sha
+                                reviewed_prs_changed = True
+                                continue
                             if full_files:
                                 pr_data = build_pr_data(
                                     pr, full_files, "incremental", head_sha, repo_path, stored_sha,
@@ -509,8 +565,14 @@ def fetch_and_process_prs(
                                 prs_to_review.append(pr_data)
                 else:
                     # New PR, not in reviewed_prs
-                    processed_files = apply_ignore_globs(
-                        fetch_pr_files(repo_path, pr_number, headers), ignore_globs)
+                    processed_files, all_ignored = _fetch_reviewable_files(
+                        repo_path, pr_number, headers, ignore_globs)
+                    if all_ignored:
+                        # Every changed file is ignored → record so we don't re-fetch every run.
+                        reviewed_prs[pr_key] = {"status": "skipped",
+                                                "skipped_at": datetime.now(timezone.utc).isoformat()}
+                        reviewed_prs_changed = True
+                        continue
                     if processed_files:
                         pr_data = build_pr_data(
                             pr, processed_files, "full", head_sha, repo_path,
@@ -584,13 +646,17 @@ for repo in repositories:
 if reviewed_prs_changed:
     waveassist.store_data("reviewed_prs", reviewed_prs)
 
-if all_pull_requests:
-    time_to_process = len(all_pull_requests) * PROCESSING_TIME_PER_PR
-    waveassist.store_data(
-        "tentative_time_to_process",
-        str(time_to_process),
-        run_based=True,
-        data_type="string",
-    )
+if not skip_run:
+    # Publish the current queue even when empty so an opt-out (repo skip / gitzoid-skip label) or a
+    # PR that closed since last run actually CLEARS a stale queue from a prior run. Under skip_run
+    # another run owns the queue, so we leave it untouched (repositories is [] there anyway).
     waveassist.store_data("pull_requests", all_pull_requests)
+    if all_pull_requests:
+        time_to_process = len(all_pull_requests) * PROCESSING_TIME_PER_PR
+        waveassist.store_data(
+            "tentative_time_to_process",
+            str(time_to_process),
+            run_based=True,
+            data_type="string",
+        )
     print(f"✅ Fetched and stored {len(all_pull_requests)} PRs.")

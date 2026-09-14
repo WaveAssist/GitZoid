@@ -8,15 +8,17 @@ Unit tests for the review-context features added to fetch_pull_requests.py + gen
 """
 import os
 import sys
+from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
+import waveassist
 import fetch_pull_requests as fpr
 from fetch_pull_requests import (
     parse_review_md, _cap_text, _matches_glob, apply_ignore_globs,
     pr_has_skip_label, fetch_repo_file, fetch_review_config, fetch_pr_comments,
-    build_pr_data,
+    build_pr_data, fetch_and_process_prs,
 )
 import generate_review as gr
 
@@ -270,3 +272,150 @@ class TestRenderBlocks:
         assert "<repo_review_instructions note=" not in prompt
         assert "<repo_conventions note=" not in prompt
         assert "<existing_discussion note=" not in prompt
+
+
+# ---------------------------------------------------------------- parser hardening (codex findings 3, 9)
+class TestParserHardening:
+    def test_nested_key_does_not_trip_controls(self):
+        # `metadata:\n  skip: true` must NOT activate the top-level repo opt-out.
+        control, _ = parse_review_md("---\nmetadata:\n  skip: true\n  severity_floor: low\n---\nx")
+        assert "skip" not in control
+        assert "severity_floor" not in control
+
+    def test_full_line_comment_ignored(self):
+        control, body = parse_review_md("---\n# a comment\nskip: true\n---\nbody")
+        assert control["skip"] is True
+        assert body == "body"
+
+    def test_inline_comment_stripped(self):
+        control, _ = parse_review_md(
+            "---\nskip: true # opt out\nseverity_floor: medium # default\n"
+            "ignore: docs/** # generated\n---\n")
+        assert control["skip"] is True
+        assert control["severity_floor"] == "medium"
+        assert control["ignore"] == ["docs/**"]
+
+    def test_block_list_item_comment_stripped(self):
+        control, _ = parse_review_md("---\nignore:\n  - docs/** # gen\n  - '*.md'\n---\n")
+        assert control["ignore"] == ["docs/**", "*.md"]
+
+
+# ---------------------------------------------------------------- glob breadth (codex finding 7)
+class TestGlobBreadth:
+    def test_bare_literal_is_not_a_subtree(self):
+        # `docs` matches only something named exactly docs, not the whole docs/ tree.
+        assert not _matches_glob("docs/x.md", "docs")
+        assert _matches_glob("docs", "docs")
+
+    def test_explicit_dir_forms_match_subtree(self):
+        for g in ("docs/", "docs/**"):
+            assert _matches_glob("docs/x/y.md", g)
+            assert not _matches_glob("src/app.py", g)
+
+    def test_star_and_basename(self):
+        assert _matches_glob("a/b/c.md", "*.md")
+        assert _matches_glob("pkg/lock.json", "lock.json")
+
+
+# ---------------------------------------------------------------- focus cap + caching (codex findings 8, 1)
+class TestFocusCapAndCache:
+    def test_focus_item_char_capped(self):
+        big = "x" * 500
+        def fake(repo, path, tok):
+            return f"---\nfocus:\n  - {big}\n---\nprose" if path == ".gitzoid/review.md" else ""
+        with patch("fetch_pull_requests.fetch_repo_file", side_effect=fake):
+            cfg = fetch_review_config("o/r", "tok")
+        assert len(cfg["focus"][0]) == fpr.MAX_FOCUS_ITEM_CHARS
+
+    def test_cache_hit_skips_github(self, monkeypatch):
+        cached_cfg = {"instructions": "cached", "focus": [], "conventions": "", "skip": False,
+                      "severity_floor": "", "ignore": [], "source": "review.md", "conventions_source": ""}
+        fresh = {"fetched_at": datetime.now(timezone.utc).isoformat(), "cfg": cached_cfg}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: fresh if key == "review_config:o/r" else default)
+        with patch("fetch_pull_requests.fetch_repo_file",
+                   side_effect=AssertionError("should not fetch on cache hit")):
+            cfg = fetch_review_config("o/r", "tok")
+        assert cfg == cached_cfg
+
+    def test_stale_cache_refetches(self, monkeypatch):
+        stale = {"fetched_at": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(),
+                 "cfg": {"instructions": "old"}}
+        monkeypatch.setattr(waveassist, "fetch_data",
+                            lambda key=None, default=None, **k: stale if key == "review_config:o/r" else default)
+        with patch("fetch_pull_requests.fetch_repo_file", return_value=""):
+            cfg = fetch_review_config("o/r", "tok")
+        assert cfg["instructions"] == ""   # refetched (empty), not the stale "old"
+
+
+# ---------------------------------------------------------------- orchestration (codex findings 2, 4, 11)
+def _pr(number, labels=None, sha=None):
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "body": "b",
+        "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+        "user": {"type": "User", "login": "alice"},
+        "head": {"sha": sha or f"sha{number}"},
+        "labels": labels or [],
+    }
+
+
+def _pr_list_resp(prs):
+    r = Mock()
+    r.status_code = 200
+    r.json.return_value = prs
+    r.links = {}
+    return r
+
+
+_EMPTY_CFG = {"instructions": "", "focus": [], "conventions": "", "skip": False,
+              "severity_floor": "", "ignore": [], "source": "", "conventions_source": ""}
+
+
+class TestOrchestration:
+    def test_repo_skip_returns_empty_and_makes_no_pr_calls(self):
+        with patch("fetch_pull_requests.fetch_review_config",
+                   return_value={**_EMPTY_CFG, "skip": True}), \
+             patch("fetch_pull_requests.requests.get",
+                   side_effect=AssertionError("must not hit GitHub for a skipped repo")):
+            prs, changed = fetch_and_process_prs({"id": "o/r"}, "tok", {})
+        assert prs == [] and changed is False
+
+    def test_gitzoid_skip_label_excludes_pr(self):
+        prs_json = [_pr(1, labels=[{"name": "gitzoid-skip"}]), _pr(2)]
+        with patch("fetch_pull_requests.fetch_review_config", return_value=dict(_EMPTY_CFG)), \
+             patch("fetch_pull_requests.requests.get", return_value=_pr_list_resp(prs_json)), \
+             patch("fetch_pull_requests.fetch_pr_files",
+                   return_value=[{"filename": "app.py", "patch": "@@", "status": "modified",
+                                  "additions": 1, "deletions": 0}]), \
+             patch("fetch_pull_requests.fetch_pr_comments", return_value=""):
+            prs, _ = fetch_and_process_prs({"id": "o/r"}, "tok", {})
+        nums = [p["pr_number"] for p in prs]
+        assert nums == [2]                       # labeled PR #1 excluded
+
+    def test_all_ignored_pr_is_recorded_skipped(self):
+        reviewed = {}
+        with patch("fetch_pull_requests.fetch_review_config",
+                   return_value={**_EMPTY_CFG, "ignore": ["docs/**"]}), \
+             patch("fetch_pull_requests.requests.get", return_value=_pr_list_resp([_pr(7)])), \
+             patch("fetch_pull_requests.fetch_pr_files",
+                   return_value=[{"filename": "docs/readme.md", "patch": "@@", "status": "modified",
+                                  "additions": 1, "deletions": 0}]), \
+             patch("fetch_pull_requests.fetch_pr_comments", return_value=""):
+            prs, changed = fetch_and_process_prs({"id": "o/r"}, "tok", reviewed)
+        assert prs == []                          # nothing reviewable
+        assert reviewed["o/r#7"]["status"] == "skipped"   # recorded so it is not re-fetched
+        assert changed is True
+
+    def test_empty_fetch_not_recorded_skipped(self):
+        # A transient empty file fetch (not all-ignored) must NOT be recorded as skipped.
+        reviewed = {}
+        with patch("fetch_pull_requests.fetch_review_config",
+                   return_value={**_EMPTY_CFG, "ignore": ["docs/**"]}), \
+             patch("fetch_pull_requests.requests.get", return_value=_pr_list_resp([_pr(8)])), \
+             patch("fetch_pull_requests.fetch_pr_files", return_value=[]), \
+             patch("fetch_pull_requests.fetch_pr_comments", return_value=""):
+            prs, changed = fetch_and_process_prs({"id": "o/r"}, "tok", reviewed)
+        assert prs == []
+        assert "o/r#8" not in reviewed             # not recorded (could be transient)
