@@ -340,7 +340,18 @@ class TestBuildPRData:
 
 class TestFetchAndProcessPRs:
     """Tests for fetch_and_process_prs function."""
-    
+
+    @pytest.fixture(autouse=True)
+    def _isolate_review_context(self):
+        # These tests predate the per-repo review-context fetch (review.md/CLAUDE.md + PR comments)
+        # and mock requests.get for the PR list only. Neutralise the new network calls so they stay
+        # hermetic; the review-context behaviour is covered in test_review_context.py.
+        empty_cfg = {"instructions": "", "focus": [], "conventions": "", "skip": False,
+                     "severity_floor": "", "ignore": [], "source": "", "conventions_source": ""}
+        with patch('fetch_pull_requests.fetch_review_config', return_value=empty_cfg), \
+             patch('fetch_pull_requests.fetch_pr_comments', return_value=""):
+            yield
+
     @patch('fetch_pull_requests.fetch_pr_files')
     @patch('fetch_pull_requests.requests.get')
     def test_first_run_processes_first_two(self, mock_get, mock_fetch_files, sample_pr_data):
