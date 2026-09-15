@@ -50,7 +50,7 @@ Try the hosted version at [https://gitzoid.com](https://gitzoid.com) with no set
 
 Reviews every pull request and comments with clear, specific fixes, automatically, ranked by severity with no noise. When new commits are pushed to a PR, GitZoid detects the changes and posts a focused incremental review instead of repeating itself (see [How Incremental Reviews Work](#how-incremental-reviews-work)).
 
-It runs continuously, about every two minutes or on a webhook.
+It runs continuously, about every two minutes or on a webhook. Each repo can steer the reviewer with a `review.md` file — set a severity floor, ignore paths, focus areas, or opt out entirely (see [Customizing Reviews Per Repo](#customizing-reviews-per-repo)).
 
 ### Security Watch
 
@@ -122,7 +122,7 @@ GitZoid is a set of flat Python node scripts wired into three independent DAG ch
 | --- | --- |
 | `check_credits_and_init.py` | Gates on credits and initializes the run. |
 | `study_repos.py` | Builds a per repo brain profile of architecture, dependencies, and auth paths, and refreshes it every two weeks. |
-| `fetch_pull_requests.py` | Pulls in new and updated pull requests. |
+| `fetch_pull_requests.py` | Pulls in new and updated pull requests, plus per-repo review config (`review.md`, `CLAUDE.md`/`AGENTS.md`) and existing PR comments. Applies repo/PR/file opt-outs. |
 | `generate_review.py` | Generates the structured review, plus incremental reviews on later commits. |
 | `post_comment.py` | Posts the review back to GitHub. |
 
@@ -160,6 +160,56 @@ GitZoid tracks the last reviewed commit SHA for each PR. When it detects new com
 4. **Focused feedback.** It posts an incremental review that acknowledges addressed issues and highlights new concerns.
 
 This ensures your team gets relevant, focused feedback on each iteration, not repeated comments about code that has not changed.
+
+---
+
+## Customizing Reviews Per Repo
+
+GitZoid reads optional configuration from each repo it reviews, so a team can steer the reviewer, teach it their house style, and opt code (or whole repos) out — all without touching GitZoid itself. Everything here is **optional and fail-open**: if a file is missing or malformed, GitZoid simply reviews as usual.
+
+### Context GitZoid picks up automatically
+
+| Source | What it does |
+| --- | --- |
+| `.gitzoid/review.md` (or `review.md` at the repo root) | Free-form review guidance written by the repo's authors — what to watch for, what to ignore, house conventions. Injected into the review prompt as context. |
+| `CLAUDE.md` (or `AGENTS.md`) | The repo's own conventions doc. Injected so reviews judge convention-fit instead of guessing. |
+| Existing PR comments | Comments already on the PR (from humans or other tools, bot noise filtered out) are shown to the reviewer so it builds on the discussion instead of repeating points already made. |
+
+All three are treated as **informational context only**. They steer focus and style but never override GitZoid's review rules or output format, and their text is never executed as an instruction to the reviewer (prompt-injection safe).
+
+### Controls in `review.md` front-matter
+
+`review.md` can start with a small YAML-style front-matter block (between `---` fences) to control *how* the repo is reviewed. Only the top-level keys below are recognized; everything else is ignored, and the rest of the file is used as review guidance.
+
+```markdown
+---
+skip: false                 # true opts this whole repo out of reviews
+severity_floor: medium      # only report findings at this severity or higher (high | medium | low)
+ignore:                     # skip changed files matching these globs
+  - "dist/**"
+  - "*.lock"
+  - "docs/**"
+focus:                      # areas to prioritize in the review
+  - "auth and permission checks"
+  - "N+1 database queries"
+---
+
+Free-form review guidance goes here, after the front-matter.
+Anything below the closing --- is passed to the reviewer as context.
+```
+
+- **`skip`** — `true` opts the entire repo out of PR review.
+- **`severity_floor`** — `high` / `medium` / `low`; only findings at or above this level are posted. Overrides the per-repo severity setting from the dashboard.
+- **`ignore`** — glob list; changed files matching any glob are dropped before review. A bare directory name (`docs`) does **not** match its subtree — use `docs/` or `docs/**`. Standard `fnmatch` wildcards apply (`*.lock`, `src/**/*.generated.ts`).
+- **`focus`** — free-text areas the reviewer should prioritize.
+
+Inline list form also works: `ignore: [dist/**, "*.lock"]`.
+
+### Skip a single PR
+
+Add the **`gitzoid-skip`** label to any pull request and GitZoid will not review it. Handy for WIP, generated, or vendored PRs without changing repo config.
+
+> **Note:** Per-repo config is cached for about an hour to avoid re-fetching from GitHub on every ~2-minute cycle, so changes to `review.md` (including `skip`) take effect within ~1h.
 
 ---
 
