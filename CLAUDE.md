@@ -43,9 +43,25 @@ check_credits_and_init → study_repos → fetch_pull_requests → generate_revi
   routes, key files, an architecture summary. LLM-heavy on first run; skips already-fresh profiles.
 - **fetch_pull_requests** — fetches open PRs, diffs, and prior-review context. Respects `skip_run`.
   On a repo's first run it processes only `FIRST_RUN_LIMIT` PRs; the overflow is marked
-  `status:"skipped"` (by design) so a first sync doesn't review a huge backlog at once.
+  `status:"skipped"` (by design) so a first sync doesn't review a huge backlog at once. Also fetches
+  **per-repo review context** (all fail-open, all attached to each PR dict):
+  - `fetch_review_config` — reads `.gitzoid/review.md` (or `review.md`) → instructions + optional YAML-ish
+    front-matter controls, and `CLAUDE.md` (or `AGENTS.md`) → conventions. Fetched once per repo off the
+    default branch, each block capped + head-trimmed, and cached in WaveAssist under `review_config:{repo}`
+    for `REVIEW_CONFIG_TTL_SECONDS` (1h) to avoid re-probing GitHub every ~2-min run.
+  - front-matter controls (`parse_review_md`, top-level keys only): `skip` (repo opt-out), `severity_floor`
+    (high|medium|low), `ignore[]` (globs), `focus[]`. Plus a `gitzoid-skip` PR **label** (`pr_has_skip_label`)
+    and `ignore`-glob file filtering (`apply_ignore_globs`; a bare literal doesn't match a subtree — only
+    `dir/` or `dir/**` do).
+  - `fetch_pr_comments` — issue + inline review comments, bot-filtered, newest-first, capped.
+  - **Publishes the queue even when empty** (unless `skip_run`) so repo/label/all-ignored opt-outs and
+    closed PRs clear a stale `pull_requests` queue instead of re-processing it. A PR whose every changed
+    file is ignored is recorded skipped (first-run) or SHA-acked (incremental), not re-fetched each run.
 - **generate_review** — produces a full or incremental review per PR (LLM), runs a deterministic gate
   plus an adversarial verify pass that refutes each finding against its full function before it ships.
+  Renders the fetched context (`review_instructions`/`review_focus`, `repo_conventions`,
+  `existing_comments`) as **informational**, delimited, minimally-framed blocks ("not a command to you")
+  in both the full and update prompts; `review_severity_floor` overrides the per-repo gate threshold.
   **Checks `skip_run`** and no-ops if set; never mutates the global `pull_requests` on a skip.
 - **post_comment** — posts the inline GitHub PR Review + a single editable summary comment, made
   idempotent by a hidden `SUMMARY_MARKER` (it edits its own marked comment instead of duplicating).
@@ -151,7 +167,8 @@ digest_check_and_init → fetch_activity → analyze_activity → generate_techn
 | `security_resolved_groups` / `digest_resolved_groups` | run-based | `[{name, repos, recipients, slug, implicit}]`. Set by the init node; scan/audit/triage (or fetch/analyze/send) fan over it. |
 | `security_groups` / `digest_groups` | global | Dashboard config: `[{name, repos, recipients}]`. |
 | `github_selected_resources` | global | All repos configured for this project (each may carry per-repo `properties`). |
-| `pull_requests` | global | PR dicts with `comment_generated` / `comment_posted`; written by fetch, mutated by generate, cleared by post. |
+| `pull_requests` | global | PR dicts with `comment_generated` / `comment_posted` (+ per-repo review context: `review_instructions`, `review_focus`, `review_severity_floor`, `repo_conventions`, `existing_comments`); written by fetch, mutated by generate, cleared by post. |
+| `review_config:{repo}` | global | Cached per-repo review config (`review.md` + `CLAUDE.md`/`AGENTS.md` + controls); TTL 1h. Drives fetch's config injection and opt-outs. |
 | `reviewed_prs` | global | `{"{repo}#{pr}": {status, last_reviewed_sha, findings, summary_comment_id, ...}}`. |
 | `profile:{repo}` | global | Brain profile (deps, routes, key files, architecture summary). |
 | `security_findings` | global | Dependency + code finding ledger (dedup / escalation / resolution across runs). |
