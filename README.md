@@ -1,26 +1,9 @@
-<p align="center">
-  <img src="https://waveassist.io/images/templates/gitzoid/GitzoidLogoDark.png" alt="GitZoid open source AI agent for GitHub code review, security, and digests" width="200" />
-</p>
+# GitZoid: Open Source AI Agent for GitHub
 
-<h1 align="center">GitZoid: Open Source AI Agent for GitHub</h1>
+**Reviews every pull request, watches your code for security issues, and emails a weekly summary of what shipped.**
+No noise, just what matters.
 
-<p align="center">
-  <b>Reviews every pull request, watches your code for security issues, and emails a weekly summary of what shipped.</b><br/>
-  No noise, just what matters.
-</p>
-
-<p align="center">
-  <a href="https://waveassist.io/assistants/gitzoid">
-    <img src="https://img.shields.io/badge/Deploy_with-WaveAssist-007F3B" alt="Deploy GitZoid on WaveAssist" />
-  </a>
-  <img src="https://img.shields.io/badge/GitZoid-Code_Review_•_Security_•_Digest-blue" alt="GitZoid AI agent badge" />
-  <a href="https://opensource.org/licenses/MIT">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" />
-  </a>
-  <a href="https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic">
-    <img src="https://img.shields.io/badge/Guide-How_to_Get_GitHub_Token-red" alt="How to get GitHub token guide" />
-  </a>
-</p>
+[Deploy on WaveAssist](https://waveassist.io/assistants/gitzoid) · [Try the hosted app](https://gitzoid.com) · [Get a GitHub token](https://gitzoid.com/blog/how-to-get-your-github-token-for-gitzoid-fine-grained-classic) · License: MIT
 
 ---
 
@@ -37,10 +20,6 @@ No separate GPT or Claude keys are required. On WaveAssist, an OpenRouter token 
 It is read only, so GitZoid comments and emails but never silently changes your code. It works with public and private repos you have access to.
 
 Try the hosted version at [https://gitzoid.com](https://gitzoid.com) with no setup required.
-
-<p align="center">
-  <img src="https://waveassist.io/images/templates/gitzoid/pr_review.png" alt="GitZoid AI agent posting an automated GitHub pull request review" width="100%" />
-</p>
 
 ---
 
@@ -75,12 +54,6 @@ A plain English summary of what shipped across your repos, every Monday, read fr
 
 ### 1. One Click Deploy on WaveAssist (Recommended)
 
-<p>
-  <a href="https://waveassist.io/assistants/gitzoid" target="_blank">
-    <img src="https://waveassist.io/images/templates/Button.png" alt="Deploy GitZoid on WaveAssist" width="230" />
-  </a>
-</p>
-
 Deploy instantly on [WaveAssist](https://waveassist.io), a zero infrastructure AI agent platform that handles everything, including your free OpenRouter AI token.
 
 How to use it.
@@ -95,12 +68,6 @@ You are now running GitZoid on autopilot.
 ---
 
 ### 2. Use GitZoid.com (No API Key Required)
-
-<p>
-  <a href="https://gitzoid.com" target="_blank">
-    <img src="https://img.shields.io/badge/%20Use%20GitZoid.com-No%20API%20Key%20Needed-0e1c3a" alt="Use GitZoid.com hosted AI agent for GitHub" />
-  </a>
-</p>
 
 Head to [gitzoid.com](https://gitzoid.com), enter your GitHub token and the repositories to monitor. GitZoid uses hosted AI credits, so no keys or setup are required.
 
