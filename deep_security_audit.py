@@ -13,8 +13,13 @@ noisy brain run can't blank the scope (the old failure mode). It then asks the c
 find the class no scanner can: bypassable auth / broken access control, backdoor-ish code, and live
 secrets. A finding survives ONLY if it carries a concrete
 {entry point → exploit path → named victim → fix} (authz), a real non-placeholder secret, or
-concrete backdoor signals — at high confidence. Survivors are appended to the run-based
-`security_candidates` key for triage_and_alert; the audit never emails directly.
+concrete backdoor signals — at high confidence. The model is also shown the repo's already-reported
+open findings: it must not report them again, and instead marks each still present, fixed (only with
+the closing code quoted verbatim) or cannot tell. A second model pass then tries to refute every new
+finding; only those it confirms with a verbatim quote survive. Survivors are appended to the run-based
+`security_candidates` key, and evidence-backed fixes to `security_code_resolutions`, for
+triage_and_alert; the audit never emails directly. A failed model call is not an audit: the repo's
+audit state is left alone so it is retried on the next daily tick.
 
 Conventions: flat script, no __main__ guard, init() first, no sibling imports, fall-through on
 empty. Every external call has a timeout; one bad repo never sinks the batch.
@@ -181,6 +186,7 @@ def audit_gate(f) -> bool:
 
 class AuthzFinding(BaseModel):
     entry_point: str = Field(description="The route/handler the attacker hits, e.g. 'POST /reset-password'")
+    handler_file: str = Field(default="", description="Path, as given in <files>, of the file with the handler")
     missing_check: str = Field(description="The authorization/identity check that is missing or bypassable")
     exploit_path: str = Field(description="Concrete steps from entry point to the bypass")
     named_victim: str = Field(description="WHO is harmed, concretely, e.g. 'any user whose email is known'")
@@ -207,10 +213,31 @@ class BackdoorFinding(BaseModel):
     confidence: Literal["high", "medium", "low"] = Field(description="high only if clearly malicious/suspicious")
 
 
+class PriorIssueStatus(BaseModel):
+    id: str = Field(description="The id of an issue from <already_reported>")
+    status: Literal["still_present", "fixed", "cannot_tell"] = Field(
+        description="fixed ONLY if the code in <files> shows the issue is closed")
+    evidence: str = Field(default="", description="For fixed: the exact current lines from <files> that close "
+                                                  "the issue, copied character for character. Empty otherwise.")
+
+
 class AuditResult(BaseModel):
     authz_findings: List[AuthzFinding] = Field(default_factory=list)
     secret_findings: List[SecretFinding] = Field(default_factory=list)
     backdoor_findings: List[BackdoorFinding] = Field(default_factory=list)
+    already_reported: List[PriorIssueStatus] = Field(default_factory=list)
+
+
+class Verdict(BaseModel):
+    index: int = Field(description="The index of the finding in <findings>")
+    verdict: Literal["confirmed", "refuted", "unsure"]
+    evidence: str = Field(default="", description="For confirmed: the exact lines from <files> that prove the "
+                                                  "issue, copied character for character")
+    reason: str = Field(default="", description="One sentence: why it holds or why it does not")
+
+
+class VerifyResult(BaseModel):
+    verdicts: List[Verdict] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- prompt
@@ -219,7 +246,65 @@ def _xml(s):
     return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def build_audit_prompt(repo_path, brain_profile, files):
+# Things the audit kept reporting as "high" that a person would not act on. Shared by the audit and the
+# verify pass so both hold the same bar.
+NOT_FINDINGS = """These are NOT findings on their own. Do not report them unless the code shows concrete harm beyond them:
+- Public documentation, API schema, health, status, version or metrics routes (for example /docs, /redoc,
+  /swagger, /openapi.json, /health), unless they expose private data or perform an action.
+- Keys that are meant to be public in client-side code: Firebase web config, Google Maps or Places browser
+  keys, Stripe publishable keys (pk_...), Sentry DSNs, analytics tokens (Mixpanel, Segment, GA), reCAPTCHA
+  site keys, OAuth client IDs.
+- Values in test, spec, mock, fixture, sample or example code, placeholders and dummy values, and
+  .env.example or template files.
+- Code that reads a secret from the environment or a secret manager. A variable name is not a leak.
+- Missing rate limits, missing CSRF protection on token-authenticated APIs, verbose errors, or other
+  best-practice gaps without a concrete exploit."""
+
+MAX_PRIOR_LISTED = 30        # open findings shown back to the audit per repo
+
+
+def _norm_ws(s):
+    return " ".join(str(s or "").split())
+
+
+def quote_in_files(quote, files, min_chars=12) -> bool:
+    """True when `quote` really appears in one of the audited files (whitespace-insensitive). Evidence
+    the model edited, paraphrased or invented does not count."""
+    q = _norm_ws(str(quote or "").strip().strip("`").strip())
+    if len(q.replace(" ", "")) < min_chars:
+        return False
+    return any(q in _norm_ws(c) for c in (files or {}).values())
+
+
+def _finding_files(e):
+    return [p.strip() for p in str(e.get("path") or "").split(",") if p.strip()]
+
+
+def prior_open_findings(ledger, repo_path, files):
+    """The repo's open code findings, as shown back to the audit: every authz finding (its handler could
+    be in any file), and secret/backdoor findings whose file is among the audited `files` (otherwise the
+    model cannot judge them). Oldest first, capped."""
+    out = []
+    for sig, e in (ledger or {}).items():
+        if not isinstance(e, dict) or e.get("repo") != repo_path or e.get("status") != "open":
+            continue
+        cat = e.get("category")
+        if cat == "authz":
+            location = e.get("entry_point") or e.get("title") or ""
+        elif cat in ("secret", "backdoor"):
+            if not any(p in files for p in _finding_files(e)):
+                continue
+            location = e.get("path") or ""
+        else:
+            continue
+        out.append({"id": sig, "category": cat, "location": location,
+                    "title": e.get("title") or "", "impact": e.get("impact") or "",
+                    "first_seen": e.get("first_seen") or ""})
+    out.sort(key=lambda x: x["first_seen"])
+    return out[:MAX_PRIOR_LISTED]
+
+
+def build_audit_prompt(repo_path, brain_profile, files, prior=None):
     arch = (brain_profile or {}).get("architecture_summary", "") or ""
     routes = (((brain_profile or {}).get("security") or {}).get("routes") or [])
     route_xml = "\n".join(
@@ -227,6 +312,17 @@ def build_audit_prompt(repo_path, brain_profile, files):
         for r in routes)
     files_xml = "\n".join(
         f"<file path=\"{_xml(p)}\">\n{_xml(c)}\n</file>" for p, c in files.items())
+    prior_xml = "\n".join(
+        f"  <issue id=\"{_xml(p['id'])}\" category=\"{_xml(p['category'])}\" location=\"{_xml(p['location'])}\">"
+        f"{_xml(p['impact'] or p['title'])}</issue>" for p in (prior or []))
+    prior_block = f"""
+<already_reported note="Issues this team was already told about. Do NOT report any of them again in
+authz_findings, secret_findings or backdoor_findings, even in different words or at a different route
+spelling. Instead give one already_reported entry per issue: still_present, fixed, or cannot_tell. Say
+fixed ONLY when the code in <files> shows the issue is closed, and copy the exact current lines that close
+it into evidence. If the relevant code is not in <files>, say cannot_tell.">
+{prior_xml}
+</already_reported>""" if prior else ""
     return f"""<role>
 You are a senior application-security engineer doing a focused audit of the security-critical code
 below. You are NOT reviewing style or general bugs. Find only issues that are real and exploitable.
@@ -254,11 +350,49 @@ below. You are NOT reviewing style or general bugs. Find only issues that are re
   check" instead.
 - Writing style: plain prose in short sentences. Do NOT use em dashes, and do not use a hyphen as a
   connector between clauses. No emojis.
+- For each authz finding, set handler_file to the path (as given in <files>) of the file with the handler.
 </hard_rules>
+<not_findings>
+{NOT_FINDINGS}
+</not_findings>{prior_block}
 <files note="The security-critical files of this repo. Audit ONLY these.">
 {files_xml}
 </files>
-<task>Return authz_findings[], secret_findings[], backdoor_findings[]. Empty lists if nothing real.</task>"""
+<task>Return authz_findings[], secret_findings[], backdoor_findings[] for NEW issues only, and
+already_reported[] for the issues listed above. Empty lists if nothing real.</task>"""
+
+
+def build_verify_prompt(repo_path, findings, files):
+    items = "\n".join(
+        f"  <finding index=\"{i}\" category=\"{_xml(f.get('category'))}\" "
+        f"location=\"{_xml(f.get('entry_point') or f.get('path'))}\">\n"
+        f"    <impact>{_xml(f.get('impact'))}</impact>\n"
+        f"    <detail>{_xml(f.get('exploit_path') or f.get('why_not_placeholder') or '; '.join(f.get('behavioral_signals') or []))}</detail>\n"
+        f"  </finding>" for i, f in enumerate(findings))
+    files_xml = "\n".join(
+        f"<file path=\"{_xml(p)}\">\n{_xml(c)}\n</file>" for p, c in files.items())
+    return f"""<role>
+You are a skeptical senior security reviewer checking another auditor's findings before they are emailed to
+an engineering team. A false alarm costs the team's trust. Try to DISPROVE each finding from the code.
+</role>
+<repo>{_xml(repo_path)}</repo>
+<rules>
+- confirmed: the code in <files> clearly shows the issue is real and exploitable as described. Copy the exact
+  lines that prove it into evidence, character for character.
+- refuted: the code shows a check, guard or context that closes it, or it is on the not_findings list.
+- unsure: you cannot tell from these files. Unsure findings are not sent.
+- Judge only what the code shows. Do not assume missing code is missing protection.
+</rules>
+<not_findings>
+{NOT_FINDINGS}
+</not_findings>
+<findings>
+{items}
+</findings>
+<files>
+{files_xml}
+</files>
+<task>Return one verdict per finding, by index.</task>"""
 
 
 # ---------------------------------------------------------------- github fetch
@@ -360,17 +494,22 @@ def _route_dedup_key(entry_point):
     return " ".join((entry_point or "").lower().split())[:60]
 
 
-def run_audit(model_name, repo_path, brain_profile, files):
-    """One model call; gate the results. Returns a list of candidate findings (gated). Each carries a
-    stable `dedup_key` (location-based) so triage dedupes it across runs regardless of wording."""
+def run_audit(model_name, repo_path, brain_profile, files, prior=None):
+    """One model call; gate the results. Returns (findings, prior_statuses, ok). `findings` are the gated
+    NEW candidates, each with a stable location-based `dedup_key` so triage dedupes it across runs
+    regardless of wording. `prior_statuses` are the model's still_present/fixed/cannot_tell answers for
+    the `prior` open findings it was shown. ok=False when the model call failed, so the caller does not
+    treat the repo as audited."""
     try:
-        result = waveassist.call_llm(model=model_name, prompt=build_audit_prompt(repo_path, brain_profile, files),
+        result = waveassist.call_llm(model=model_name,
+                                     prompt=build_audit_prompt(repo_path, brain_profile, files, prior),
                                      response_model=AuditResult, should_retry=True, max_tokens=MAX_AUDIT_TOKENS)
     except Exception as e:
         print(f"⚠️ audit LLM failed for {repo_path}: {e}")
-        return []
+        return [], [], False
     if result is None:
-        return []
+        print(f"⚠️ audit LLM returned nothing for {repo_path}")
+        return [], [], False
     out = []
     for f in result.authz_findings:
         d = f.model_dump(); d.update({"category": "authz", "repo": repo_path,
@@ -391,7 +530,61 @@ def run_audit(model_name, repo_path, brain_profile, files):
                                       "dedup_key": "backdoor:" + (f.path or "")})
         if audit_gate(d):
             out.append(d)
-    return out
+    return out, list(result.already_reported or []), True
+
+
+def prior_outcomes(statuses, prior, files):
+    """Turn the model's answers about already-reported findings into (resolutions, still_present).
+    A finding counts as fixed only with evidence that really appears in the audited files; anything
+    else (no quote, an edited quote, an unknown id) leaves it open."""
+    known = {p["id"] for p in (prior or [])}
+    resolutions, present = [], []
+    for s in statuses or []:
+        sid = getattr(s, "id", None) if not isinstance(s, dict) else s.get("id")
+        status = getattr(s, "status", None) if not isinstance(s, dict) else s.get("status")
+        evidence = getattr(s, "evidence", "") if not isinstance(s, dict) else s.get("evidence", "")
+        if sid not in known:
+            continue
+        if status == "fixed" and quote_in_files(evidence, files):
+            resolutions.append({"sig": sid, "evidence": _norm_ws(evidence)[:500]})
+        elif status == "still_present":
+            present.append(sid)
+    return resolutions, present
+
+
+def verify_findings(model_name, repo_path, findings, files):
+    """Second pass that tries to refute each new finding before anything is emailed. Keeps a finding
+    only when the verifier confirms it AND quotes code that really appears in the files. Returns
+    (kept, ok); ok=False when the call failed, and then nothing from this repo is sent this run."""
+    if not findings:
+        return [], True
+    named = set()
+    for f in findings:
+        for p in [f.get("handler_file") or ""] + _finding_files(f):
+            if p.strip() in files:
+                named.add(p.strip())
+    unplaced = any(f.get("category") == "authz" and (f.get("handler_file") or "").strip() not in files
+                   for f in findings)
+    context = files if (unplaced or not named) else {p: files[p] for p in named}
+    try:
+        result = waveassist.call_llm(model=model_name, prompt=build_verify_prompt(repo_path, findings, context),
+                                     response_model=VerifyResult, should_retry=True, max_tokens=MAX_AUDIT_TOKENS)
+    except Exception as e:
+        print(f"⚠️ verify LLM failed for {repo_path}: {e}")
+        return [], False
+    if result is None:
+        print(f"⚠️ verify LLM returned nothing for {repo_path}")
+        return [], False
+    verdicts = {v.index: v for v in (result.verdicts or [])}
+    kept = []
+    for i, f in enumerate(findings):
+        v = verdicts.get(i)
+        if v is not None and v.verdict == "confirmed" and quote_in_files(v.evidence, context):
+            kept.append(f)
+        else:
+            why = "no verdict" if v is None else (v.verdict if v.verdict != "confirmed" else "evidence not in code")
+            print(f"· {repo_path}: dropped {f.get('title')} ({why})")
+    return kept, True
 
 
 # ---------------------------------------------------------------- driver (flat, fall-through)
@@ -423,13 +616,15 @@ if repositories:
     due = [r for r in repo_paths if needs_audit(audit_state.get(r), audit_weekday=audit_weekday)]
     due.sort(key=lambda r: (audit_state.get(r) or {}).get("last_audit_at", ""))
 
-    candidates = []
+    ledger = waveassist.fetch_data("security_findings", default={}) or {}   # read-only here
+    candidates, resolutions, still_present = [], [], []
     scanned_ok = set()
     started = time.monotonic()
     for repo_path in due:
         if time.monotonic() - started > RUN_TIME_BUDGET_SECONDS:
             print("GitZoid Security: audit time budget reached; remaining repos resume next tick.")
             break
+        queue_before = queue
         try:
             profile = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
             branch = (profile.get("_fingerprint") or {}).get("branch") or ""
@@ -453,13 +648,30 @@ if repositories:
                 c = fetch_file(repo_path, p, branch, headers)
                 if c:
                     files[p] = c
-            repo_findings = run_audit(model_name, repo_path, profile, files) if files else []
+            prior = prior_open_findings(ledger, repo_path, files)
+            repo_findings, statuses, ok = (run_audit(model_name, repo_path, profile, files, prior)
+                                           if files else ([], [], True))
+            if ok:
+                repo_findings, ok = verify_findings(model_name, repo_path, repo_findings, files)
+            if not ok:
+                # The model call failed: this is NOT an audit. Leave the repo's audit state and queued
+                # files alone so it is retried on the next daily tick, and publish nothing for it.
+                queue = queue_before
+                print(f"⚠️ {repo_path}: audit incomplete; will retry, open findings unchanged")
+                continue
+            fixed, present = prior_outcomes(statuses, prior, files)
+            for r in fixed:
+                r["repo"] = repo_path
+            resolutions.extend(fixed)
+            still_present.extend(present)
             candidates.extend(repo_findings)
             audit_state[repo_path] = {"last_audit_at": datetime.now(timezone.utc).isoformat(),
                                       "last_audit_branch": branch, "last_audit_sha": head_sha}
-            scanned_ok.add(repo_path)   # fully audited this run → triage may resolve its code findings
-            print(f"✓ {repo_path}: deep audit done over {len(files)} file(s), {len(repo_findings)} finding(s)")
+            scanned_ok.add(repo_path)
+            print(f"✓ {repo_path}: deep audit done over {len(files)} file(s), {len(repo_findings)} new "
+                  f"finding(s), {len(fixed)} fixed with evidence, {len(present)} still present")
         except Exception as e:
+            queue = queue_before
             print(f"⚠️ deep audit failed for {repo_path}: {e}; skipping repo")
             continue
 
@@ -468,10 +680,17 @@ if repositories:
     existing = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []
     waveassist.store_data("security_candidates", existing + candidates,
                           run_based=True, data_type="json")
-    # Publish the repos whose CODE was deep-audited this run so triage can resolve fixed code findings
-    # (authz/secret/backdoor). Kept separate from the daily dependency scan's set so neither class
-    # resolves the other's findings without being re-examined. Merge in case of re-entry.
+    # Publish the repos whose CODE was deep-audited this run (informational: code findings no longer
+    # resolve just because the audit did not repeat them), plus the evidence-backed outcomes for the
+    # findings already reported: triage resolves a code finding ONLY from security_code_resolutions.
+    # Merge in case of re-entry.
     prior_ok = set(waveassist.fetch_data("security_scanned_ok_code", run_based=True, default=[]) or [])
     waveassist.store_data("security_scanned_ok_code", sorted(prior_ok | scanned_ok),
                           run_based=True, data_type="json")
-    print(f"GitZoid Security: deep_security_audit produced {len(candidates)} candidate(s).")
+    prior_res = waveassist.fetch_data("security_code_resolutions", run_based=True, default=[]) or []
+    waveassist.store_data("security_code_resolutions", prior_res + resolutions, run_based=True, data_type="json")
+    prior_present = waveassist.fetch_data("security_code_present", run_based=True, default=[]) or []
+    waveassist.store_data("security_code_present", sorted(set(prior_present) | set(still_present)),
+                          run_based=True, data_type="json")
+    print(f"GitZoid Security: deep_security_audit produced {len(candidates)} candidate(s), "
+          f"{len(resolutions)} evidence-backed fix(es).")

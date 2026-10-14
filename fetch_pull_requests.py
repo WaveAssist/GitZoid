@@ -620,6 +620,29 @@ def fetch_and_process_prs(
     return prs_to_review, reviewed_prs_changed
 
 
+def parse_repo_list(value):
+    """The `review_skip_repos` setting -> lowercased repo names. Accepts a list (dashboard list input)
+    or a JSON / comma / newline separated string. Entries may be "owner/repo" or just "repo"."""
+    import json
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = json.loads(text) if text.startswith("[") else None
+        except ValueError:
+            value = None
+        if value is None:
+            value = text.replace("\n", ",").split(",")
+    return {str(v).strip().lower() for v in (value or []) if str(v).strip()}
+
+
+def review_skipped(repo, skip_set) -> bool:
+    """True when the repo (a github_selected_resources item or "owner/repo") is listed in
+    `review_skip_repos`, by full name or by bare repo name. Only PR review skips it: security scans
+    and the digest still cover the repo."""
+    full = str((repo.get("id") if isinstance(repo, dict) else repo) or "").lower()
+    return bool(full) and (full in skip_set or full.split("/")[-1] in skip_set)
+
+
 # Single-run lock (set by check_credits_and_init): if another run holds it, no-op (empty repo list
 # means no PRs are queued, so generate_review / post_comment downstream also no-op).
 skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
@@ -628,6 +651,14 @@ if skip_run:
 
 # Fetch input from WaveAssist
 repositories = [] if skip_run else (waveassist.fetch_data("github_selected_resources") or [])
+# Repos opted out of PR review from the dashboard (security and digest still cover them).
+review_skip = parse_repo_list(waveassist.fetch_data("review_skip_repos", default="") or "")
+if review_skip:
+    _skipped = [r for r in repositories if review_skipped(r, review_skip)]
+    repositories = [r for r in repositories if not review_skipped(r, review_skip)]
+    if _skipped:
+        print(f"⏭️  PR review off for {len(_skipped)} repo(s) by setting: "
+              + ", ".join(str(r.get("id") if isinstance(r, dict) else r) for r in _skipped))
 access_token = waveassist.fetch_data("github_access_token") or ""
 
 # Fetch existing reviewed PRs tracker

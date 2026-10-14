@@ -19,6 +19,7 @@ Conventions: flat script, no __main__ guard, init() first, no sibling-node impor
 empty. Every external call has an explicit timeout; one bad repo never sinks the batch (soft-fail).
 """
 import re
+import re
 import json
 import time
 import base64
@@ -154,9 +155,10 @@ def parse_pipfile_lock(data: dict):
     return out
 
 
-def parse_manifest(filename: str, content: str):
+def parse_manifest(filename: str, content: str, errors=None):
     """Dispatch a manifest/lockfile to its parser; return [{name, version, ecosystem}]. Soft-fails
-    (bad JSON, unknown file) to []."""
+    (bad JSON, unknown file) to []; a parse failure is also appended to `errors` when given, so the
+    caller knows the dependency list is incomplete."""
     base = (filename or "").split("/")[-1]
     eco = LOCKFILE_NAMES.get(base) or MANIFEST_NAMES.get(base)
     if not eco:
@@ -178,6 +180,8 @@ def parse_manifest(filename: str, content: str):
             pairs = []
     except Exception as e:
         print(f"⚠️ failed to parse {filename}: {e}")
+        if errors is not None:
+            errors.append(filename)
         return []
     seen, deps = set(), []
     for name, ver in pairs:
@@ -239,11 +243,53 @@ def normalize_severity(raw) -> str:
     return "unknown"
 
 
-def _severity_from_cvss(score) -> str:
+_CVSS3_WEIGHTS = {
+    "AV": {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2},
+    "AC": {"L": 0.77, "H": 0.44},
+    "UI": {"N": 0.85, "R": 0.62},
+    "C": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "I": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "A": {"H": 0.56, "L": 0.22, "N": 0.0},
+}
+
+
+def _cvss_roundup(x: float) -> float:
+    """CVSS 3.1 Roundup: the smallest number, to one decimal place, that is >= x."""
+    i = int(round(x * 100000))
+    return i / 100000.0 if i % 10000 == 0 else (i // 10000 + 1) / 10.0
+
+
+def cvss3_base_score(vector: str):
+    """Base score from a CVSS 3.0/3.1 vector ("CVSS:3.1/AV:N/AC:L/..."). OSV usually gives the vector,
+    not the number, so float() alone turned real high/critical advisories into "unknown" and the gate
+    dropped them. Returns None for anything that is not a complete v3 vector (e.g. CVSS v4)."""
+    parts = str(vector or "").strip().split("/")
+    if not parts or not parts[0].upper().startswith("CVSS:3"):
+        return None
+    m = dict(p.split(":", 1) for p in parts[1:] if ":" in p)
     try:
-        v = float(score)
-    except (TypeError, ValueError):
-        return "unknown"
+        scope_changed = m["S"] == "C"
+        pr = {"N": 0.85, "L": 0.68 if scope_changed else 0.62, "H": 0.5 if scope_changed else 0.27}[m["PR"]]
+        av, ac, ui = (_CVSS3_WEIGHTS[k][m[k]] for k in ("AV", "AC", "UI"))
+        c, i, a = (_CVSS3_WEIGHTS[k][m[k]] for k in ("C", "I", "A"))
+    except KeyError:
+        return None
+    iss = 1 - (1 - c) * (1 - i) * (1 - a)
+    impact = (7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15) if scope_changed else 6.42 * iss
+    if impact <= 0:
+        return 0.0
+    exploitability = 8.22 * av * ac * pr * ui
+    total = (impact + exploitability) * (1.08 if scope_changed else 1.0)
+    return _cvss_roundup(min(total, 10.0))
+
+
+def _severity_from_cvss(score) -> str:
+    v = cvss3_base_score(score)
+    if v is None:
+        try:
+            v = float(score)
+        except (TypeError, ValueError):
+            return "unknown"
     if v >= 9.0:
         return "critical"
     if v >= 7.0:
@@ -255,24 +301,42 @@ def _severity_from_cvss(score) -> str:
     return "unknown"
 
 
-def parse_osv_vuln(vuln: dict) -> dict:
-    """Pull the fields we use from a full OSV vuln record: id, aliases, fixed version, severity,
-    plain summary."""
+def _version_key(v):
+    return [int(p) for p in re.findall(r"\d+", str(v or ""))]
+
+
+def _norm_pkg(name):
+    return re.sub(r"[-_.]+", "-", (name or "").lower())
+
+
+def fixed_version_for(vuln: dict, package=None, installed=None):
+    """The version that fixes THIS package at THIS installed version. An advisory can cover several
+    packages and several release lines (1.x fixed in 1.2.3, 2.x fixed in 2.0.5), so take the fixes
+    listed for this package only and pick the lowest one above the installed version. None when no
+    fix above the installed version is published. Without package/installed it falls back to the
+    first fix listed (the old behaviour)."""
+    affected = vuln.get("affected") or []
+    if package:
+        mine = [a for a in affected if _norm_pkg((a.get("package") or {}).get("name")) == _norm_pkg(package)]
+        affected = mine or affected          # records without package names: keep them all
+    fixes = [ev["fixed"] for aff in affected for rng in (aff.get("ranges") or [])
+             for ev in (rng.get("events") or []) if ev.get("fixed")]
+    if not fixes:
+        return None
+    if not installed or not _version_key(installed):
+        return fixes[0]
+    above = [f for f in fixes if _version_key(f) > _version_key(installed)]
+    return min(above, key=_version_key) if above else None
+
+
+def parse_osv_vuln(vuln: dict, package=None, installed=None) -> dict:
+    """Pull the fields we use from a full OSV vuln record: id, aliases, fixed version (for this
+    package and installed version, when given), severity, plain summary."""
     vuln_id = vuln.get("id", "")
     aliases = list(vuln.get("aliases") or [])
     summary = vuln.get("summary") or (vuln.get("details") or "")[:300]
 
-    fixed = None
-    for aff in (vuln.get("affected") or []):
-        for rng in (aff.get("ranges") or []):
-            for ev in (rng.get("events") or []):
-                if ev.get("fixed"):
-                    fixed = ev["fixed"]
-                    break
-            if fixed:
-                break
-        if fixed:
-            break
+    fixed = fixed_version_for(vuln, package, installed)
 
     severity = normalize_severity((vuln.get("database_specific") or {}).get("severity"))
     if severity == "unknown":
@@ -424,9 +488,11 @@ def fetch_file(repo_path, filename, branch, headers):
     return None
 
 
-def collect_repo_dependencies(repo_path, branch, headers):
+def collect_repo_dependencies(repo_path, branch, headers, problems=None):
     """Fetch known manifests/lockfiles and merge into a deduped dependency list. Lockfiles win:
-    if any lockfile is present for an ecosystem, the loose manifest for it is skipped."""
+    if any lockfile is present for an ecosystem, the loose manifest for it is skipped. A file that
+    failed to parse, or a list cut at MAX_DEPS_PER_REPO, is appended to `problems` when given: the
+    list is then incomplete, so the scan must not resolve findings for packages it did not see."""
     found, raw_blobs = {}, []
     for fname in FETCH_ORDER:
         content = fetch_file(repo_path, fname, branch, headers)
@@ -438,11 +504,13 @@ def collect_repo_dependencies(repo_path, branch, headers):
         # skip a manifest if we already have a lockfile for the same ecosystem
         if not is_lock and any(found.get(e) == "lock" for e in [eco]):
             continue
-        for dep in parse_manifest(fname, content):
+        for dep in parse_manifest(fname, content, errors=problems):
             found[(dep["name"], dep["version"], dep["ecosystem"])] = dep
         if is_lock:
             found[eco] = "lock"
     deps = [v for k, v in found.items() if isinstance(v, dict)]
+    if len(deps) > MAX_DEPS_PER_REPO and problems is not None:
+        problems.append(f"more than {MAX_DEPS_PER_REPO} dependencies")
     return deps[:MAX_DEPS_PER_REPO], content_hash("\n".join(sorted(raw_blobs)))
 
 
@@ -536,7 +604,8 @@ def already_alerted_packages(prior_ledger) -> set:
 def suppress_new_advisory(repo, name, version, vuln_id, prior_ledger, alerted_pkgs) -> bool:
     """True when (repo, name, version) was already alerted AND this is a genuinely NEW advisory (its
     signature is not already in the ledger). New advisories on an already-alerted package are dropped
-    silently and BEFORE any OSV hydrate / LLM call. The advisory we originally alerted on is NOT new
+    silently before any LLM call, unless the advisory is on the CISA KEV list (being exploited in the
+    wild), which the driver still alerts. The advisory we originally alerted on is NOT new
     (its sig IS in the ledger), so it still flows through the cached path below and keeps its own
     lifecycle (escalation, fix-available, resolution) intact."""
     if (repo, name, version) not in alerted_pkgs:
@@ -580,17 +649,14 @@ if repositories:
             profile = waveassist.fetch_data(f"profile:{repo_path}", default={}) or {}
             branch = (profile.get("_fingerprint") or {}).get("branch") or ""
 
-            deps, blob_hash = collect_repo_dependencies(repo_path, branch, headers)
+            problems = []
+            deps, blob_hash = collect_repo_dependencies(repo_path, branch, headers, problems=problems)
             if not deps:
                 print(f"✓ {repo_path}: no parseable dependencies; skip")
                 continue
-
-            prev = waveassist.fetch_data(f"dependency_snapshot:{repo_path}", default={}) or {}
-            if prev.get("hash") == blob_hash and prev.get("scanned_clean"):
-                # Manifests unchanged AND last scan found nothing — safe to skip the OSV round-trip.
-                # (Feeds still change daily, so we only skip when the last scan was clean.)
-                print(f"✓ {repo_path}: lockfiles unchanged since a clean scan; skip")
-                continue
+            # No "lockfiles unchanged since a clean scan" skip: advisories are published every day
+            # against versions already installed, so an unchanged lockfile still needs the daily
+            # lookup (one OSV request per repo).
 
             osv_hits, osv_ok = query_osv(deps)
             repo_findings = []
@@ -598,11 +664,8 @@ if repositories:
                 reachability = dep_reachability(package_name, profile)
                 for vuln_stub in vuln_stubs:
                     advisory_id = vuln_stub.get("id")
-                    if suppress_new_advisory(repo_path, package_name, package_version, advisory_id,
-                                             prior_ledger, alerted_pkgs):
-                        print(f"· {package_name} {package_version}: new advisory {advisory_id} suppressed "
-                              f"(package already alerted; upgrade recommendation unchanged)")
-                        continue
+                    suppress = suppress_new_advisory(repo_path, package_name, package_version, advisory_id,
+                                                     prior_ledger, alerted_pkgs)
                     # Hydrate once per unique advisory across all repos this run (successes cached; a
                     # failed fetch retries on the next repo rather than caching a miss that hides it).
                     vuln_record = hydrated_vulns.get(advisory_id)
@@ -612,7 +675,13 @@ if repositories:
                             hydrated_vulns[advisory_id] = vuln_record
                     if not vuln_record:
                         continue
-                    parsed_vuln = parse_osv_vuln(vuln_record)
+                    if suppress and not is_actively_exploited(cve_aliases(vuln_record), kev_set):
+                        # The user was already told to upgrade this package; a new advisory does not
+                        # change that. One being exploited in the wild still alerts.
+                        print(f"· {package_name} {package_version}: new advisory {advisory_id} suppressed "
+                              f"(package already alerted; upgrade recommendation unchanged)")
+                        continue
+                    parsed_vuln = parse_osv_vuln(vuln_record, package_name, package_version)
                     finding = {
                         "category": "dependency", "repo": repo_path,
                         "name": package_name, "version": package_version,
@@ -643,10 +712,13 @@ if repositories:
                     repo_findings.append(finding)
 
             candidates.extend(repo_findings)
-            # Mark the repo scanned-ok only when BOTH feeds were healthy this run; a hiccup must never
-            # look like "the issue is gone", so on a degraded run the repo stays out of scanned_ok and
-            # triage carries its findings forward instead of resolving them.
-            if osv_ok and kev_ok:
+            # Mark the repo scanned-ok only when BOTH feeds were healthy and the dependency list is
+            # complete; a hiccup or an unparseable lockfile must never look like "the issue is gone",
+            # so the repo stays out of scanned_ok and triage carries its findings forward.
+            if problems:
+                print(f"⚠️ {repo_path}: dependency list incomplete ({', '.join(problems)}); "
+                      f"open findings are kept, not resolved")
+            if osv_ok and kev_ok and not problems:
                 scanned_ok.add(repo_path)
             waveassist.store_data(f"dependency_snapshot:{repo_path}",
                                   {"hash": blob_hash,

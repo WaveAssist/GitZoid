@@ -375,3 +375,145 @@ class TestAlreadyAlertedSuppression:
     def test_empty_ledger_suppresses_nothing(self):
         assert sd.already_alerted_packages({}) == set()
         assert sd.suppress_new_advisory("o/r", "django", "1.6", "CVE-NEW", {}, set()) is False
+
+
+# ---------------------------------------------------------------- fewer, proper alerts
+
+import pytest
+
+
+class TestCvssVector:
+    @pytest.mark.parametrize("vector,score", [
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", 7.5),
+        ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", 6.5),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N", 6.1),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+        ("CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", 7.8),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N", 0.0),
+    ])
+    def test_base_score_matches_the_spec(self, vector, score):
+        assert sd.cvss3_base_score(vector) == score
+
+    def test_v4_and_garbage_are_not_scored(self):
+        assert sd.cvss3_base_score("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N") is None
+        assert sd.cvss3_base_score("CVSS:3.1/AV:N") is None
+
+    def test_vector_only_advisory_is_no_longer_unknown(self):
+        # OSV gives the vector, not the number; float() made these "unknown" and the gate dropped them.
+        vuln = {"id": "PYSEC-1", "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"}]}
+        assert parse_osv_vuln(vuln)["severity"] == "high"
+
+
+class TestFixedVersionForPackage:
+    VULN = {"id": "GHSA-1", "affected": [
+        {"package": {"name": "other-pkg"}, "ranges": [{"events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]},
+        {"package": {"name": "Django"}, "ranges": [
+            {"events": [{"introduced": "3.2"}, {"fixed": "3.2.25"}]},
+            {"events": [{"introduced": "4.2"}, {"fixed": "4.2.11"}]}]}]}
+
+    def test_takes_this_packages_fix_for_the_installed_line(self):
+        assert parse_osv_vuln(self.VULN, "django", "4.2.3")["fixed"] == "4.2.11"
+        assert parse_osv_vuln(self.VULN, "django", "3.2.1")["fixed"] == "3.2.25"
+
+    def test_none_when_no_fix_above_installed(self):
+        assert sd.fixed_version_for(self.VULN, "django", "5.0.0") is None
+
+    def test_old_behaviour_without_package(self):
+        assert parse_osv_vuln(self.VULN)["fixed"] == "9.9.9"
+
+
+class TestParseErrorsReported:
+    def test_bad_lockfile_is_reported(self):
+        errors = []
+        assert parse_manifest("package-lock.json", "{not json", errors=errors) == []
+        assert errors == ["package-lock.json"]
+
+
+class TestScanDriver:
+    """End to end over fake GitHub / OSV / KEV feeds."""
+    REPO = "o/r"
+
+    def _run(self, monkeypatch, files, osv_vulns, kev=(), prior_ledger=None, extra=None):
+        import base64, runpy, requests, waveassist
+        fetch_map = {"security_skip_run": "0", "github_access_token": "t",
+                     "security_resolved_groups": [{"slug": "g", "repos": [self.REPO]}],
+                     "security_findings": prior_ledger or {}, **(extra or {})}
+        stored = {}
+
+        class R:
+            def __init__(self, data, code=200):
+                self.status_code, self._d = code, data
+
+            def json(self):
+                return self._d
+
+        def get(url, *a, **k):
+            if "known_exploited" in url:
+                return R({"vulnerabilities": [{"cveID": c} for c in kev]})
+            if "/contents/" in url:
+                name = url.rsplit("/", 1)[-1]
+                if name in files:
+                    return R({"encoding": "base64", "content": base64.b64encode(files[name].encode()).decode()})
+                return R({}, 404)
+            if "api.osv.dev/v1/vulns/" in url:
+                vid = url.rsplit("/", 1)[-1]
+                return R(osv_vulns[vid])
+            return R({}, 404)
+
+        def post(url, json=None, **k):
+            out = []
+            for q in json["queries"]:
+                ids = [v for v, rec in osv_vulns.items()
+                       if any((a.get("package") or {}).get("name") == q["package"]["name"] for a in rec["affected"])]
+                out.append({"vulns": [{"id": i} for i in ids]})
+            return R({"results": out})
+
+        risk = sd.DependencyRisk(is_real_risk=True, impact="an attacker can do X", reason="r")
+        monkeypatch.setattr(requests, "get", get)
+        monkeypatch.setattr(requests, "post", post)
+        monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data", lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(waveassist, "call_llm", lambda **k: risk)
+        monkeypatch.setattr(sd.time, "sleep", lambda s: None)
+        runpy.run_path("scan_dependencies.py", run_name="__main__")
+        return stored
+
+    @staticmethod
+    def _vuln(vid, cve, pkg="django"):
+        return {"id": vid, "aliases": [cve], "database_specific": {"severity": "HIGH"},
+                "affected": [{"package": {"name": pkg}, "ranges": [{"events": [{"introduced": "0"}, {"fixed": "3.2.25"}]}]}]}
+
+    def _alerted_ledger(self):
+        sig = sd._dep_sig(self.REPO, "django", "GHSA-OLD")
+        return {sig: {"category": "dependency", "repo": self.REPO, "name": "django", "version": "3.2.0",
+                      "vuln_id": "GHSA-OLD", "status": "open", "alerted": True}}
+
+    def test_new_advisory_on_alerted_package_stays_quiet(self, monkeypatch):
+        stored = self._run(monkeypatch, {"requirements.txt": "django==3.2.0\n"},
+                           {"GHSA-NEW": self._vuln("GHSA-NEW", "CVE-2")}, prior_ledger=self._alerted_ledger())
+        assert stored["security_candidates"] == []
+
+    def test_exploited_advisory_on_alerted_package_still_alerts(self, monkeypatch):
+        stored = self._run(monkeypatch, {"requirements.txt": "django==3.2.0\n"},
+                           {"GHSA-NEW": self._vuln("GHSA-NEW", "CVE-2")}, kev=["CVE-2"],
+                           prior_ledger=self._alerted_ledger())
+        assert [c["vuln_id"] for c in stored["security_candidates"]] == ["GHSA-NEW"]
+        assert stored["security_candidates"][0]["actively_exploited"] is True
+
+    def test_unchanged_clean_lockfile_is_still_checked(self, monkeypatch):
+        # Yesterday this repo scanned clean with the same lockfile; today an advisory is published
+        # against the version it already uses. The old skip missed it until the lockfile changed.
+        snapshot = {"hash": sd.content_hash("django==3.2.0\n"), "scanned_clean": True}
+        stored = self._run(monkeypatch, {"requirements.txt": "django==3.2.0\n"},
+                           {"GHSA-NEW": self._vuln("GHSA-NEW", "CVE-2")},
+                           extra={f"dependency_snapshot:{self.REPO}": snapshot})
+        assert [c["vuln_id"] for c in stored["security_candidates"]] == ["GHSA-NEW"]
+
+    def test_unparseable_lockfile_blocks_resolution(self, monkeypatch):
+        stored = self._run(monkeypatch, {"Pipfile.lock": "{broken", "requirements.txt": "django==3.2.0\n"}, {})
+        assert stored["security_scanned_ok_deps"] == []
+
+    def test_clean_complete_scan_is_scanned_ok(self, monkeypatch):
+        stored = self._run(monkeypatch, {"requirements.txt": "django==3.2.0\n"}, {})
+        assert stored["security_scanned_ok_deps"] == [self.REPO]

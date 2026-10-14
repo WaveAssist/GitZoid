@@ -675,3 +675,40 @@ class TestBuildPRDataBrainProfile:
         r = build_pr_data(sample_pr_data, sample_pr_files, "full", "abc", "owner/repo")
         assert "brain_profile" not in r
 
+
+
+class TestReviewSkipRepos:
+    """`review_skip_repos` turns PR review off for listed repos; security and digest are unaffected."""
+
+    def test_parse_list_json_and_text(self):
+        from fetch_pull_requests import parse_repo_list
+        assert parse_repo_list(["Org/IPD-API", " ipd-admin "]) == {"org/ipd-api", "ipd-admin"}
+        assert parse_repo_list('["org/a", "b"]') == {"org/a", "b"}
+        assert parse_repo_list("org/a, b\nc") == {"org/a", "b", "c"}
+        assert parse_repo_list("") == set() and parse_repo_list(None) == set()
+
+    def test_matches_full_or_bare_name_only(self):
+        from fetch_pull_requests import review_skipped
+        skip = {"ipd-api", "org/ipd-user"}
+        assert review_skipped({"id": "Org/ipd-api"}, skip)
+        assert review_skipped("org/ipd-user", skip)
+        assert not review_skipped({"id": "org/ipd-api-v2"}, skip)
+        assert not review_skipped({"id": "other/ipd-user"}, skip)
+
+    def test_driver_skips_listed_repos(self, monkeypatch):
+        import runpy, waveassist, requests
+        seen = []
+        fetch_map = {"skip_run": "0", "github_access_token": "t", "reviewed_prs": {},
+                     "github_selected_resources": [{"id": "org/ipd-api"}, {"id": "org/ipd-admin"},
+                                                   {"id": "org/ipd-user"}, {"id": "org/erp"}],
+                     "review_skip_repos": ["ipd-api", "ipd-admin", "ipd-user"]}
+
+        def get(url, *a, **k):
+            seen.append(url)
+            r = Mock(); r.status_code = 404; r.json.return_value = {}; r.links = {}; r.headers = {}
+            return r
+        monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data", lambda *a, **k: True)
+        monkeypatch.setattr(requests, "get", get)
+        runpy.run_path("fetch_pull_requests.py", run_name="__main__")
+        assert seen and all("/org/erp/" in u for u in seen)

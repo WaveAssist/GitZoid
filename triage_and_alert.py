@@ -25,12 +25,14 @@ import waveassist
 waveassist.init()   # credits gated once upstream in security_check_and_init
 
 MAX_CODE_ALERTS = 5     # cap on the code/access section only; dependencies are listed in full (issue #1)
-MAX_RESOLVED_KEPT = 60
+MAX_RESOLVED_KEPT = 60          # resolved DEPENDENCY entries kept (a resolved package stays resolved)
+MAX_RESOLVED_CODE_KEPT = 2000   # resolved CODE entries kept: the memory that stops a re-found finding re-alerting
 LEDGER_KEY = "security_findings"
 RUN_LOCK_KEY = "security_run_lock"
 LOCK_TTL_SECONDS = 2700
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
 _CODE_CATEGORIES = ("authz", "secret", "backdoor")
+_FILE_CATEGORIES = ("secret", "backdoor")      # code findings located by file path(s)
 
 
 def lock_is_active(lock, now=None) -> bool:
@@ -98,66 +100,158 @@ def _entry_from(f, sig, now_iso):
             "first_seen": now_iso, "last_seen": now_iso}
 
 
-def reconcile_ledger(prior_ledger, candidates, scanned_ok_deps=None, scanned_ok_code=None, now=None):
-    """Returns (new_ledger, to_alert, resolved). Alert new or reappeared findings and escalations;
-    carry unchanged ones silently; mark a currently-open finding resolved ONLY when its OWN class was
-    actually re-checked this run — a dependency finding resolves only when its repo is in
-    `scanned_ok_deps` (the daily dep scan ran clean), a code finding (authz/secret/backdoor) only when
-    its repo is in `scanned_ok_code` (the weekly deep audit ran). This is category-scoped on purpose:
-    a daily dependency scan must NOT silently resolve an un-re-examined auth hole (which would then
-    re-alert at the next weekly audit — the very churn issue #1 is about). Absence with no matching
-    scan carries the finding forward."""
+def _apply_escalation(prior, f, now_iso):
+    """Update an already-alerted entry with a worse reading, and raise its high-water mark and record
+    that a fix was alerted, so a later flap is quiet."""
+    new_sev = f.get("severity")
+    prior.update({"severity": new_sev, "fixed": f.get("fixed"),
+                  "actively_exploited": f.get("actively_exploited", prior.get("actively_exploited")),
+                  "impact": f.get("impact") or prior.get("impact"),
+                  "status": "open", "alerted": True, "last_seen": now_iso})
+    hwm = prior.get("max_alerted_severity", new_sev)
+    if _SEV_RANK.get(new_sev, 4) < _SEV_RANK.get(hwm, 4):
+        prior["max_alerted_severity"] = new_sev
+    if f.get("fixed"):
+        prior["fix_alerted"] = True
+
+
+def _finding_files(f):
+    """The files a secret/backdoor finding points at. The audit sometimes names several in one finding
+    ("a/.env.production, b/.env.production") and groups them differently from week to week."""
+    if f.get("category") not in _FILE_CATEGORIES:
+        return set()
+    return {p.strip().lower() for p in str(f.get("path") or "").split(",") if p.strip()}
+
+
+def _alerted_files(ledger):
+    """{(repo, category, file): earliest first_seen} for every file an already-alerted secret/backdoor
+    finding named, resolved ones included."""
+    seen = {}
+    for e in (ledger or {}).values():
+        if not isinstance(e, dict) or not e.get("alerted", True):
+            continue
+        for p in _finding_files(e):
+            k = (e.get("repo"), e.get("category"), p)
+            fs = e.get("first_seen") or ""
+            if k not in seen or (fs and (not seen[k] or fs < seen[k])):
+                seen[k] = fs
+    return seen
+
+
+def reconcile_ledger(prior_ledger, candidates, scanned_ok_deps=None, scanned_ok_code=None, now=None,
+                     code_resolutions=None, code_present=None):
+    """Returns (new_ledger, to_alert, resolved). Alert new findings and escalations; carry unchanged
+    ones silently.
+
+    Resolution is category-scoped. A dependency finding resolves when it is absent from a complete
+    dependency scan of its repo (`scanned_ok_deps`); a feed or parse hiccup keeps the repo out of that
+    set, so absence alone never resolves it. A code finding (authz/secret/backdoor) never resolves by
+    absence: the weekly audit is an LLM pass and is not consistent from week to week. It resolves only
+    when the audit showed the fix with evidence quoted from the current code (`code_resolutions`, a
+    list of {sig, evidence} or a {sig: evidence} dict). `scanned_ok_code` is accepted for compatibility
+    and no longer resolves anything. `code_present` lists open code findings the audit confirmed are
+    still there.
+
+    A finding is alerted once. A code finding that was resolved by absence (before evidence-based
+    resolution) and is re-found reopens silently, unless it got worse than what was already alerted. A
+    secret/backdoor finding whose files were all in earlier alerts is recorded without an email. A
+    dependency finding that reappears after resolving is alerted: the feed is deterministic, so the
+    package really came back. An open finding whose alert did not go out (`alerted` is False, set by
+    the driver when a send fails) is alerted again on the next run until it is delivered."""
     now_iso = (now or datetime.now(timezone.utc)).isoformat()
     new_ledger = {k: dict(v) for k, v in (prior_ledger or {}).items()}
     ok_deps = set(scanned_ok_deps or [])
-    ok_code = set(scanned_ok_code or [])
-    current_sigs, to_alert = set(), []
+    if isinstance(code_resolutions, dict):
+        fixes = dict(code_resolutions)
+    else:
+        fixes = {r.get("sig"): r.get("evidence", "") for r in (code_resolutions or []) if isinstance(r, dict)}
+    present = set(code_present or [])
+    alerted_files = _alerted_files(new_ledger)
+    current_sigs, to_alert, queued = set(), [], set()
+
+    def alert(sig, entry):
+        if sig not in queued:
+            queued.add(sig)
+            entry["alerted"] = True
+            to_alert.append(entry)
+
+    def reopen(entry):
+        entry.pop("resolved_at", None)
+        entry.update({"status": "open", "last_seen": now_iso, "reopened_at": now_iso})
 
     for f in (candidates or []):
         sig = finding_sig(f)
         current_sigs.add(sig)
         prior = new_ledger.get(sig)
+        if (prior is not None and prior.get("status") == "resolved"
+                and f.get("category") in _CODE_CATEGORIES and prior.get("alerted", True)):
+            # Already emailed, re-found after an absence-resolve: reopen quietly.
+            escalate = should_escalate(prior, f)
+            reopen(prior)
+            if escalate:
+                _apply_escalation(prior, f, now_iso)
+                alert(sig, prior)
+            continue
         if prior is None or prior.get("status") == "resolved":
             entry = _entry_from(f, sig, now_iso)
             if prior:
                 entry["first_seen"] = prior.get("first_seen", now_iso)
+            files = _finding_files(f)
+            earlier = [alerted_files.get((f.get("repo"), f.get("category"), p)) for p in files]
+            if files and all(e is not None for e in earlier):
+                # Every file was already in an alert; the audit just grouped them differently. Keep
+                # it as still-open (not "new") for the digest, but do not email it again.
+                entry["first_seen"] = min([e for e in earlier if e] or [entry["first_seen"]])
+                entry["covered_by_earlier_alert"] = True
+                new_ledger[sig] = entry
+                continue
             new_ledger[sig] = entry
-            to_alert.append(entry)
+            alert(sig, entry)
         elif should_escalate(prior, f):
-            new_sev = f.get("severity")
-            prior.update({"severity": new_sev, "fixed": f.get("fixed"),
-                          "actively_exploited": f.get("actively_exploited", prior.get("actively_exploited")),
-                          "impact": f.get("impact") or prior.get("impact"),
-                          "status": "open", "alerted": True, "last_seen": now_iso})
-            # raise the high-water mark and record that a fix was alerted, so a later flap is quiet
-            hwm = prior.get("max_alerted_severity", new_sev)
-            if _SEV_RANK.get(new_sev, 4) < _SEV_RANK.get(hwm, 4):
-                prior["max_alerted_severity"] = new_sev
-            if f.get("fixed"):
-                prior["fix_alerted"] = True
-            to_alert.append(prior)
+            _apply_escalation(prior, f, now_iso)
+            alert(sig, prior)
         else:
             prior["last_seen"] = now_iso
             prior["status"] = "open"
+
+    # Open code findings the audit confirmed are still present (it no longer re-reports them).
+    for sig in present:
+        e = new_ledger.get(sig)
+        if isinstance(e, dict) and e.get("category") in _CODE_CATEGORIES and sig not in current_sigs:
+            current_sigs.add(sig)
+            if e.get("status") == "resolved":
+                reopen(e)
+            else:
+                e["last_seen"] = now_iso
 
     resolved = []
     for sig, entry in new_ledger.items():
         if entry.get("status") != "open" or sig in current_sigs:
             continue
-        repo = entry.get("repo")
-        is_code = entry.get("category") in _CODE_CATEGORIES
-        rescanned = (repo in ok_code) if is_code else (repo in ok_deps)
-        if rescanned:                      # only resolve when this finding's OWN class was re-checked
-            entry["status"] = "resolved"
-            entry["resolved_at"] = now_iso
-            resolved.append(entry)
+        if entry.get("category") in _CODE_CATEGORIES:
+            if sig not in fixes:
+                continue                   # not shown fixed: stays open, whatever the audit omitted
+            entry["resolution_evidence"] = str(fixes.get(sig) or "")[:500]
+        elif entry.get("repo") not in ok_deps:
+            continue                       # dependency scan did not complete for this repo
+        entry["status"] = "resolved"
+        entry["resolved_at"] = now_iso
+        resolved.append(entry)
 
-    # Prune oldest resolved entries beyond the cap (keep the ledger from growing forever).
-    resolved_entries = [(s, e) for s, e in new_ledger.items() if e.get("status") == "resolved"]
-    if len(resolved_entries) > MAX_RESOLVED_KEPT:
-        resolved_entries.sort(key=lambda se: se[1].get("resolved_at", ""))
-        for s, _ in resolved_entries[:-MAX_RESOLVED_KEPT]:
-            new_ledger.pop(s, None)
+    # Retry alerts that did not go out last time.
+    for sig, entry in new_ledger.items():
+        if entry.get("status") == "open" and entry.get("alerted") is False:
+            alert(sig, entry)
+
+    # Prune oldest resolved entries beyond the caps (keep the ledger from growing forever). Resolved
+    # code entries are kept far longer: dropping one would let the audit re-alert it as new.
+    for is_code, cap in ((False, MAX_RESOLVED_KEPT), (True, MAX_RESOLVED_CODE_KEPT)):
+        resolved_entries = [(s, e) for s, e in new_ledger.items() if e.get("status") == "resolved"
+                            and (e.get("category") in _CODE_CATEGORIES) == is_code]
+        if len(resolved_entries) > cap:
+            resolved_entries.sort(key=lambda se: se[1].get("resolved_at", ""))
+            for s, _ in resolved_entries[:-cap]:
+                new_ledger.pop(s, None)
 
     return new_ledger, to_alert, resolved
 
@@ -536,9 +630,14 @@ if not skip:
     prior_ledger = waveassist.fetch_data(LEDGER_KEY, default={}) or {}
     scanned_ok_deps = waveassist.fetch_data("security_scanned_ok_deps", run_based=True, default=[]) or []
     scanned_ok_code = waveassist.fetch_data("security_scanned_ok_code", run_based=True, default=[]) or []
+    # Evidence-backed outcomes from deep_security_audit for code findings already reported.
+    code_resolutions = waveassist.fetch_data("security_code_resolutions", run_based=True, default=[]) or []
+    code_present = waveassist.fetch_data("security_code_present", run_based=True, default=[]) or []
     new_ledger, to_alert, resolved = reconcile_ledger(prior_ledger, candidates,
                                                       scanned_ok_deps=scanned_ok_deps,
-                                                      scanned_ok_code=scanned_ok_code)
+                                                      scanned_ok_code=scanned_ok_code,
+                                                      code_resolutions=code_resolutions,
+                                                      code_present=code_present)
 
     # security_resolved_groups is set by security_check_and_init (group-scoped, exclusive membership).
     # Fall back to resolving from github_selected_resources for runs started before this change.
@@ -549,6 +648,8 @@ if not skip:
             parse_groups(waveassist.fetch_data("security_groups", default=[])), _all_repos)
     scanned_repos = sum(len(g.get("repos") or []) for g in resolved_groups)
 
+    # Saved before sending so a crash mid-send cannot send twice; findings whose email does not go
+    # out are un-marked below and saved again, so the next run retries them.
     waveassist.store_data(LEDGER_KEY, new_ledger, data_type="json")
 
     preview = False
@@ -560,7 +661,7 @@ if not skip:
     if to_alert:
         units = group_alerts(to_alert, resolved_groups)
 
-        sent_count, total_issues, last_html, results = 0, 0, "", []
+        sent_count, total_issues, last_html, results, undelivered = 0, 0, "", [], []
         for unit in units:
             ranked = rank_findings(unit["findings"])
             code, deps = split_findings(ranked)
@@ -586,8 +687,17 @@ if not skip:
                     delivered = False
             if delivered:
                 sent_count += 1
+            else:
+                undelivered.extend(unit["findings"])
             results.append({"group": unit["slug"], "issues": n,
                             "sent": delivered, "previewed": preview})
+
+        if undelivered:
+            # Not sent (send failed, or a preview run): un-mark so the next run alerts them again.
+            for f in undelivered:
+                f["alerted"] = False
+            waveassist.store_data(LEDGER_KEY, new_ledger, data_type="json")
+            print(f"GitZoid Security: {len(undelivered)} finding(s) not delivered; will retry next run.")
 
         title = (f"GitZoid Security (preview): {len(units)} group email(s) prepared"
                  if preview else
