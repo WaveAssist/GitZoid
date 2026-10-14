@@ -24,6 +24,7 @@ import json
 import time
 import base64
 import hashlib
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import requests
 from pydantic import BaseModel, Field
@@ -449,9 +450,10 @@ plain English a busy engineer instantly understands.
 </rules>"""
 
 
-def assess_finding(model_name, finding, brain_profile):
+def assess_finding(model_name, finding, brain_profile, answered=None):
     """Ask the model for impact + realism. On any LLM failure, fail OPEN to a feed-only finding
-    (the feed gate already vouched for it) rather than dropping a real issue."""
+    (the feed gate already vouched for it) rather than dropping a real issue. `answered` (a list),
+    when given, gets True appended only if the model actually returned a verdict."""
     try:
         risk = waveassist.call_llm(model=model_name,
                                    prompt=build_assessment_prompt(finding, brain_profile),
@@ -462,7 +464,47 @@ def assess_finding(model_name, finding, brain_profile):
         return True, ""
     if risk is None:
         return True, ""
+    if answered is not None:
+        answered.append(True)
     return bool(risk.is_real_risk), (risk.impact or "").strip()
+
+
+# ---------------------------------------------------------------- remembered "not real" verdicts
+
+VERDICTS_KEY = "dependency_verdicts"
+VERDICT_TTL_DAYS = 90          # re-ask the model about a dismissed advisory after this long
+VERDICT_KEEP_DAYS = 180        # drop remembered verdicts older than this
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
+
+
+def remembered_not_real(verdict, finding, now=None) -> bool:
+    """True when the model already judged this advisory not a realistic risk for this repo and nothing
+    material has changed since: it is not newly on the CISA KEV list, its severity has not risen, and
+    the verdict is under VERDICT_TTL_DAYS old. Without this memory every dismissed advisory was
+    re-judged every day, and the day the model answered differently it became a "new" alert."""
+    if not isinstance(verdict, dict) or verdict.get("real") is not False:
+        return False
+    if finding.get("actively_exploited") and not verdict.get("kev"):
+        return False
+    if _SEV_ORDER.get(finding.get("severity"), 4) < _SEV_ORDER.get(verdict.get("severity"), 4):
+        return False
+    try:
+        age = (now or datetime.now(timezone.utc)) - datetime.fromisoformat(verdict["judged_at"])
+    except Exception:
+        return False
+    return age < timedelta(days=VERDICT_TTL_DAYS)
+
+
+def prune_verdicts(verdicts, now=None):
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=VERDICT_KEEP_DAYS)
+    out = {}
+    for k, v in (verdicts or {}).items():
+        try:
+            if datetime.fromisoformat(v["judged_at"]) >= cutoff:
+                out[k] = v
+        except Exception:
+            continue
+    return out
 
 
 # ---------------------------------------------------------------- github fetch helpers
@@ -629,6 +671,8 @@ if repositories:
     kev_set, kev_ok = fetch_kev_set_with_status()
     prior_ledger = waveassist.fetch_data("security_findings", default={}) or {}
     alerted_pkgs = already_alerted_packages(prior_ledger)   # packages the user was already told to upgrade
+    verdicts = waveassist.fetch_data(VERDICTS_KEY, default={}) or {}
+    verdicts_changed = False
     candidates = []
     scanned_ok = set()
     # Within-run cache of hydrated OSV records, keyed by advisory id. OSV querybatch returns only
@@ -703,9 +747,19 @@ if repositories:
                         finding["impact"] = ledger_entry.get("impact") or ""
                         repo_findings.append(finding)
                         continue
-                    # Per-repo realism judgement (NOT cached across repos — see note at hydrated_vulns).
-                    is_real, impact = assess_finding(model_name, finding, profile)
+                    # Per-repo realism judgement (NOT cached across repos — see note at hydrated_vulns),
+                    # remembered when the model dismissed it, so it is not re-judged every day.
+                    vsig = _dep_sig(repo_path, package_name, parsed_vuln["id"])
+                    if remembered_not_real(verdicts.get(vsig), finding):
+                        continue
+                    answered = []
+                    is_real, impact = assess_finding(model_name, finding, profile, answered=answered)
                     if not is_real:
+                        if answered:
+                            verdicts[vsig] = {"real": False, "severity": finding["severity"],
+                                              "kev": bool(finding["actively_exploited"]),
+                                              "judged_at": datetime.now(timezone.utc).isoformat()}
+                            verdicts_changed = True
                         print(f"· dropped {package_name} {parsed_vuln['id']} (model: not a realistic risk)")
                         continue
                     finding["impact"] = impact
@@ -729,6 +783,9 @@ if repositories:
         except Exception as e:
             print(f"⚠️ scan failed for {repo_path}: {e}; skipping repo")
             continue
+
+    if verdicts_changed or len(prune_verdicts(verdicts)) != len(verdicts):
+        waveassist.store_data(VERDICTS_KEY, prune_verdicts(verdicts), data_type="json")
 
     # Hand candidates to triage (run-based; deep_security_audit appends to the same key next).
     existing = waveassist.fetch_data("security_candidates", run_based=True, default=[]) or []

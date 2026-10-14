@@ -340,7 +340,7 @@ class TestAuditDriver:
     """End to end over a fake GitHub: a failed model call must not count as an audit, and only a
     verified finding reaches triage."""
 
-    def _run(self, monkeypatch, audit=None, verify=None, fail=False):
+    def _run(self, monkeypatch, audit=None, verify=None, fail=False, github_down=False):
         import base64, runpy, requests, waveassist
         fetch_map = {"security_skip_run": "0", "github_access_token": "t",
                      "security_resolved_groups": [{"slug": "g", "repos": ["o/r"]}],
@@ -355,6 +355,8 @@ class TestAuditDriver:
                 return self._d
 
         def get(url, *a, **k):
+            if github_down and "/commits/" not in url:
+                return R({}, 502)
             if "/git/trees/" in url:
                 return R({"tree": [{"type": "blob", "path": "api/auth.py", "size": 200}]})
             if "/contents/" in url:
@@ -394,3 +396,7 @@ class TestAuditDriver:
         stored = self._run(monkeypatch, audit=audit, verify=verify)
         assert [c["entry_point"] for c in stored["security_candidates"]] == ["GET /users/<id>"]
         assert "o/r" in stored["security_audit_state"]
+
+    def test_github_failure_is_retried_not_recorded(self, monkeypatch):
+        stored = self._run(monkeypatch, fail=True, github_down=True)
+        assert "o/r" not in stored["security_audit_state"]

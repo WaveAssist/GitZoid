@@ -434,7 +434,7 @@ class TestScanDriver:
     """End to end over fake GitHub / OSV / KEV feeds."""
     REPO = "o/r"
 
-    def _run(self, monkeypatch, files, osv_vulns, kev=(), prior_ledger=None, extra=None):
+    def _run(self, monkeypatch, files, osv_vulns, kev=(), prior_ledger=None, extra=None, real=True, calls=None):
         import base64, runpy, requests, waveassist
         fetch_map = {"security_skip_run": "0", "github_access_token": "t",
                      "security_resolved_groups": [{"slug": "g", "repos": [self.REPO]}],
@@ -469,12 +469,12 @@ class TestScanDriver:
                 out.append({"vulns": [{"id": i} for i in ids]})
             return R({"results": out})
 
-        risk = sd.DependencyRisk(is_real_risk=True, impact="an attacker can do X", reason="r")
+        risk = sd.DependencyRisk(is_real_risk=real, impact="an attacker can do X" if real else "", reason="r")
         monkeypatch.setattr(requests, "get", get)
         monkeypatch.setattr(requests, "post", post)
         monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
         monkeypatch.setattr(waveassist, "store_data", lambda key, value, **k: stored.__setitem__(key, value))
-        monkeypatch.setattr(waveassist, "call_llm", lambda **k: risk)
+        monkeypatch.setattr(waveassist, "call_llm", lambda **k: (calls.append(1) if calls is not None else None) or risk)
         monkeypatch.setattr(sd.time, "sleep", lambda s: None)
         runpy.run_path("scan_dependencies.py", run_name="__main__")
         return stored
@@ -517,3 +517,47 @@ class TestScanDriver:
     def test_clean_complete_scan_is_scanned_ok(self, monkeypatch):
         stored = self._run(monkeypatch, {"requirements.txt": "django==3.2.0\n"}, {})
         assert stored["security_scanned_ok_deps"] == [self.REPO]
+
+
+class TestRememberedVerdicts:
+    """A dismissed advisory is not re-judged every day; only a material change re-asks the model."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    NOW = _dt(2026, 10, 14, tzinfo=_tz.utc)
+
+    def _v(self, days_ago=1, severity="high", kev=False):
+        return {"real": False, "severity": severity, "kev": kev,
+                "judged_at": (self.NOW - self._td(days=days_ago)).isoformat()}
+
+    def test_recent_dismissal_is_remembered(self):
+        assert sd.remembered_not_real(self._v(), {"severity": "high"}, now=self.NOW)
+
+    def test_material_changes_re_ask(self):
+        assert not sd.remembered_not_real(self._v(), {"severity": "critical"}, now=self.NOW)
+        assert not sd.remembered_not_real(self._v(), {"severity": "high", "actively_exploited": True}, now=self.NOW)
+        assert not sd.remembered_not_real(self._v(days_ago=91), {"severity": "high"}, now=self.NOW)
+        assert not sd.remembered_not_real(None, {"severity": "high"}, now=self.NOW)
+
+    def test_prune_drops_old_verdicts(self):
+        out = sd.prune_verdicts({"a": self._v(10), "b": self._v(200), "c": {"bad": 1}}, now=self.NOW)
+        assert list(out) == ["a"]
+
+    def test_second_day_does_not_re_judge(self, monkeypatch):
+        run = TestScanDriver()
+        files = {"requirements.txt": "django==3.2.0\n"}
+        vulns = {"GHSA-NEW": TestScanDriver._vuln("GHSA-NEW", "CVE-2")}
+        calls = []
+        day1 = run._run(monkeypatch, files, vulns, real=False, calls=calls)
+        assert len(calls) == 1 and day1["security_candidates"] == []
+        day2 = run._run(monkeypatch, files, vulns, real=False, calls=calls,
+                        extra={"dependency_verdicts": day1["dependency_verdicts"]})
+        assert len(calls) == 1 and day2["security_candidates"] == []      # remembered, no new call
+
+    def test_kev_listing_re_asks(self, monkeypatch):
+        run = TestScanDriver()
+        files = {"requirements.txt": "django==3.2.0\n"}
+        vulns = {"GHSA-NEW": TestScanDriver._vuln("GHSA-NEW", "CVE-2")}
+        calls = []
+        day1 = run._run(monkeypatch, files, vulns, real=False, calls=calls)
+        run._run(monkeypatch, files, vulns, real=False, calls=calls, kev=["CVE-2"],
+                 extra={"dependency_verdicts": day1["dependency_verdicts"]})
+        assert len(calls) == 2

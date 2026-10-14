@@ -558,14 +558,9 @@ def verify_findings(model_name, repo_path, findings, files):
     (kept, ok); ok=False when the call failed, and then nothing from this repo is sent this run."""
     if not findings:
         return [], True
-    named = set()
-    for f in findings:
-        for p in [f.get("handler_file") or ""] + _finding_files(f):
-            if p.strip() in files:
-                named.add(p.strip())
-    unplaced = any(f.get("category") == "authz" and (f.get("handler_file") or "").strip() not in files
-                   for f in findings)
-    context = files if (unplaced or not named) else {p: files[p] for p in named}
+    # The verifier sees everything the audit saw: auth is often enforced in middleware or a router
+    # setup file, not the handler, and a verifier shown only the handler can only answer "unsure".
+    context = files
     try:
         result = waveassist.call_llm(model=model_name, prompt=build_verify_prompt(repo_path, findings, context),
                                      response_model=VerifyResult, should_retry=True, max_tokens=MAX_AUDIT_TOKENS)
@@ -648,6 +643,12 @@ if repositories:
                 c = fetch_file(repo_path, p, branch, headers)
                 if c:
                     files[p] = c
+            if not tree or (selected and not files):
+                # GitHub returned no tree or none of the files: a fetch failure, not an empty repo.
+                # Retry tomorrow rather than recording an audit that read nothing.
+                queue = queue_before
+                print(f"⚠️ {repo_path}: could not read the repo from GitHub; will retry")
+                continue
             prior = prior_open_findings(ledger, repo_path, files)
             repo_findings, statuses, ok = (run_audit(model_name, repo_path, profile, files, prior)
                                            if files else ([], [], True))
