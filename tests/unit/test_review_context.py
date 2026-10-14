@@ -339,7 +339,7 @@ class TestFocusCapAndCache:
         assert cfg == cached_cfg
 
     def test_stale_cache_refetches(self, monkeypatch):
-        stale = {"fetched_at": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(),
+        stale = {"fetched_at": (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat(),
                  "cfg": {"instructions": "old"}}
         monkeypatch.setattr(waveassist, "fetch_data",
                             lambda key=None, default=None, **k: stale if key == "review_config:o/r" else default)

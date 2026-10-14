@@ -182,7 +182,7 @@ The **Skip PR reviews for these repos** setting (`review_skip_repos`, a list of 
 
 Add the **`gitzoid-skip`** label to any pull request and GitZoid will not review it. Handy for WIP, generated, or vendored PRs without changing repo config.
 
-> **Note:** Per-repo config is cached for about an hour to avoid re-fetching from GitHub on every ~2-minute cycle, so changes to `review.md` (including `skip`) take effect within ~1h.
+> **Note:** Per-repo config is cached for about six hours to avoid re-fetching from GitHub on every ~2-minute cycle, so changes to `review.md` (including `skip`) take effect within ~6h.
 
 ---
 

@@ -712,3 +712,120 @@ class TestReviewSkipRepos:
         monkeypatch.setattr(requests, "get", get)
         runpy.run_path("fetch_pull_requests.py", run_name="__main__")
         assert seen and all("/org/erp/" in u for u in seen)
+
+
+class TestConditionalPrList:
+    """Polling ~130 repos every 2 minutes used the whole GitHub hourly limit. The open-PR listing is a
+    conditional request: an unchanged repo answers 304, which GitHub does not count."""
+
+    def _resp(self, status, prs=None, etag=None):
+        r = Mock()
+        r.status_code = status
+        r.json.return_value = prs if prs is not None else []
+        r.links = {}
+        r.headers = {"ETag": etag} if etag else {}
+        return r
+
+    def _gh_pr(self, n):
+        return {"number": n, "title": f"PR {n}", "body": "b", "draft": False, "labels": [{"name": "x", "id": 1}],
+                "created_at": "2026-10-13T00:00:00Z", "updated_at": "2026-10-14T00:00:00Z",
+                "user": {"login": "dev", "type": "User", "id": 9}, "head": {"sha": "abc", "repo": {"big": "x" * 500}},
+                "base": {"repo": {"big": "x" * 500}}, "_links": {"self": "u"}}
+
+    def test_first_fetch_caches_slim_list_with_etag(self):
+        from fetch_pull_requests import list_open_prs
+        cache = {}
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(200, [self._gh_pr(1)], 'W/"e1"')) as g:
+            prs = list_open_prs("o/r", {"Authorization": "t"}, cache)
+        assert "If-None-Match" not in g.call_args.kwargs["headers"]
+        assert cache["o/r"]["etag"] == 'W/"e1"' and prs[0]["number"] == 1
+        assert "base" not in prs[0] and "repo" not in prs[0]["head"]      # slim: no repo objects
+
+    def test_304_reuses_cache_and_sends_etag(self):
+        from fetch_pull_requests import list_open_prs
+        cache = {"o/r": {"etag": 'W/"e1"', "prs": [{"number": 7}]}}
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(304)) as g:
+            prs = list_open_prs("o/r", {"Authorization": "t"}, cache)
+        assert g.call_args.kwargs["headers"]["If-None-Match"] == 'W/"e1"'
+        assert prs == [{"number": 7}] and cache["o/r"]["etag"] == 'W/"e1"'
+
+    def test_changed_list_replaces_cache(self):
+        from fetch_pull_requests import list_open_prs
+        cache = {"o/r": {"etag": 'W/"e1"', "prs": [{"number": 7}]}}
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(200, [self._gh_pr(8)], 'W/"e2"')):
+            prs = list_open_prs("o/r", {}, cache)
+        assert [p["number"] for p in prs] == [8] and cache["o/r"]["etag"] == 'W/"e2"'
+
+    def test_failure_returns_none_and_keeps_cache(self):
+        from fetch_pull_requests import list_open_prs
+        cache = {"o/r": {"etag": 'W/"e1"', "prs": [{"number": 7}]}}
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(403)):
+            assert list_open_prs("o/r", {}, cache) is None
+        assert cache["o/r"]["etag"] == 'W/"e1"'
+
+    def test_cached_and_fresh_lists_review_the_same(self, monkeypatch):
+        """A 304 must lead to exactly the same PR handling as a fresh 200 (same queue, same state)."""
+        from fetch_pull_requests import fetch_and_process_prs
+        import fetch_pull_requests as fp
+        monkeypatch.setattr(fp, "fetch_review_config", lambda *a, **k: {})
+        monkeypatch.setattr(fp, "_fetch_reviewable_files", lambda *a, **k: ([{"filename": "a.py"}], False))
+        monkeypatch.setattr(fp, "fetch_pr_comments", lambda *a, **k: "")
+        reviewed = {"o/r#99": {"status": "skipped"}}                    # not a first run
+        cache = {}
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(200, [self._gh_pr(1)], 'W/"e1"')):
+            fresh, _ = fetch_and_process_prs({"id": "o/r"}, "t", dict(reviewed), list_cache=cache)
+        with patch("fetch_pull_requests.requests.get", return_value=self._resp(304)):
+            cached, _ = fetch_and_process_prs({"id": "o/r"}, "t", dict(reviewed), list_cache=cache)
+        assert [p["pr_number"] for p in fresh] == [p["pr_number"] for p in cached] == [1]
+        assert fresh[0]["title"] == cached[0]["title"] and fresh[0]["current_sha"] == cached[0]["current_sha"]
+
+    def test_driver_saves_cache_only_when_a_list_changed(self, monkeypatch):
+        import runpy, waveassist, requests
+        stored = {}
+        fetch_map = {"skip_run": "0", "github_access_token": "t", "reviewed_prs": {},
+                     "github_selected_resources": [{"id": "o/a"}],
+                     "pr_list_cache": {"o/a": {"etag": 'W/"e1"', "prs": []}, "o/gone": {"etag": "x", "prs": []}}}
+        monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data", lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(requests, "get", lambda *a, **k: self._resp(304))
+        runpy.run_path("fetch_pull_requests.py", run_name="__main__")
+        # o/a unchanged (304); o/gone dropped because it is no longer selected -> saved once, pruned
+        assert stored.get("pr_list_cache") == {"o/a": {"etag": 'W/"e1"', "prs": []}}
+
+
+class TestQueueSize:
+    """One project's queue grew to 12 MB (a 1,017-file PR), over the API's 2.5 MB request limit; the save
+    failed silently and no PR in that project was reviewed for days."""
+
+    def test_cap_keeps_smallest_patches_and_all_filenames(self):
+        from fetch_pull_requests import cap_patches
+        files = [{"filename": "big.py", "patch": "x" * 100}, {"filename": "a.py", "patch": "y" * 30},
+                 {"filename": "b.py", "patch": "z" * 40}]
+        out = cap_patches(files, budget=80)
+        assert [f["filename"] for f in out] == ["big.py", "a.py", "b.py"]
+        assert out[0]["patch"] == "" and out[0]["patch_omitted"] is True
+        assert out[1]["patch"] == "y" * 30 and out[2]["patch"] == "z" * 40
+        assert files[0]["patch"] == "x" * 100                  # input untouched
+
+    def test_build_pr_data_caps_patches(self):
+        from fetch_pull_requests import build_pr_data, PR_PATCH_BUDGET_CHARS
+        files = [{"filename": f"f{i}.py", "patch": "p" * 1000} for i in range(1000)]
+        data = build_pr_data({"number": 1, "title": "t", "body": "b", "created_at": "x"}, files, "full", "sha", "o/r")
+        assert len(data["files"]) == 1000
+        assert sum(len(f["patch"]) for f in data["files"]) <= PR_PATCH_BUDGET_CHARS
+
+    def test_fit_queue_defers_largest_and_keeps_order(self):
+        from fetch_pull_requests import fit_queue
+        prs = [{"n": 1, "d": "a" * 50}, {"n": 2, "d": "b" * 500}, {"n": 3, "d": "c" * 60}]
+        kept, deferred = fit_queue(prs, max_bytes=200)
+        assert [p["n"] for p in kept] == [1, 3] and deferred == 1
+        assert fit_queue(prs, max_bytes=10_000) == (prs, 0)
+
+    def test_failed_save_is_logged(self, monkeypatch, capsys):
+        import runpy, waveassist, requests
+        fetch_map = {"skip_run": "0", "github_access_token": "t", "reviewed_prs": {},
+                     "github_selected_resources": []}
+        monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data", lambda key, value, **k: False if key == "pull_requests" else True)
+        runpy.run_path("fetch_pull_requests.py", run_name="__main__")
+        assert "Could not save the review queue" in capsys.readouterr().out
