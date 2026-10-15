@@ -240,3 +240,163 @@ class TestModels:
             "named_victim": "v", "reproduction": "r", "fix": "f",
             "impact": "i", "confidence": "high"})
         assert f.entry_point == "x"
+
+
+# ---------------------------------------------------------------- fewer, proper alerts
+
+import deep_security_audit as dsa
+
+AUTH_PY = '''def get_user(request, user_id):
+    if not request.user.is_authenticated:
+        raise PermissionDenied()
+    return User.objects.get(id=user_id)   # no ownership check
+'''
+
+
+def _authz_finding(entry="GET /users/<id>", handler="api/auth.py"):
+    return {"category": "authz", "repo": "o/r", "entry_point": entry, "handler_file": handler, "path": "",
+            "title": f"Bypassable check: {entry}", "impact": "reads any user's profile",
+            "exploit_path": "call it with another id", "confidence": "high", "severity": "high"}
+
+
+class TestQuoteInFiles:
+    def test_whitespace_insensitive_exact_quote(self):
+        assert dsa.quote_in_files("return  User.objects.get(id=user_id)", {"a.py": AUTH_PY})
+
+    def test_edited_or_invented_quote_rejected(self):
+        assert not dsa.quote_in_files("if request.user.id != user_id: raise", {"a.py": AUTH_PY})
+
+    def test_too_short_quote_rejected(self):
+        assert not dsa.quote_in_files("raise", {"a.py": AUTH_PY})
+
+
+class TestPriorOpenFindings:
+    LEDGER = {
+        "a1": {"repo": "o/r", "status": "open", "category": "authz", "entry_point": "GET /x", "first_seen": "2"},
+        "s1": {"repo": "o/r", "status": "open", "category": "secret", "path": "cfg/a.ts, cfg/b.ts", "first_seen": "1"},
+        "s2": {"repo": "o/r", "status": "open", "category": "secret", "path": "other.ts", "first_seen": "1"},
+        "r1": {"repo": "o/r", "status": "resolved", "category": "authz", "entry_point": "GET /y"},
+        "o1": {"repo": "o/other", "status": "open", "category": "authz", "entry_point": "GET /z"},
+        "d1": {"repo": "o/r", "status": "open", "category": "dependency", "name": "x"},
+    }
+
+    def test_lists_open_authz_and_secrets_in_audited_files_only(self):
+        out = dsa.prior_open_findings(self.LEDGER, "o/r", {"cfg/b.ts": "x"})
+        assert [p["id"] for p in out] == ["s1", "a1"]      # oldest first; s2's file not audited
+
+    def test_prompt_lists_them_and_the_not_findings(self):
+        prior = dsa.prior_open_findings(self.LEDGER, "o/r", {"cfg/b.ts": "x"})
+        p = dsa.build_audit_prompt("o/r", {}, {"cfg/b.ts": "x"}, prior)
+        assert "<already_reported" in p and 'id="a1"' in p and "<not_findings>" in p
+        assert "<already_reported" not in dsa.build_audit_prompt("o/r", {}, {"cfg/b.ts": "x"})
+
+
+class TestPriorOutcomes:
+    PRIOR = [{"id": "a1"}, {"id": "a2"}, {"id": "a3"}]
+
+    def test_fixed_needs_a_real_quote(self):
+        statuses = [{"id": "a1", "status": "fixed", "evidence": "raise PermissionDenied()"},
+                    {"id": "a2", "status": "fixed", "evidence": "if user.owns(obj): return obj  # invented"},
+                    {"id": "a3", "status": "still_present"},
+                    {"id": "zz", "status": "fixed", "evidence": "raise PermissionDenied()"}]
+        fixed, present = dsa.prior_outcomes(statuses, self.PRIOR, {"api/auth.py": AUTH_PY})
+        assert [r["sig"] for r in fixed] == ["a1"]
+        assert present == ["a3"]
+
+
+class TestVerifyFindings:
+    def _llm(self, monkeypatch, verdicts=None, raise_exc=False):
+        def call_llm(**k):
+            if raise_exc:
+                raise RuntimeError("provider down")
+            return dsa.VerifyResult.model_validate({"verdicts": verdicts})
+        monkeypatch.setattr(dsa.waveassist, "call_llm", call_llm)
+
+    def test_keeps_only_confirmed_with_real_evidence(self, monkeypatch):
+        self._llm(monkeypatch, [
+            {"index": 0, "verdict": "confirmed", "evidence": "return User.objects.get(id=user_id)"},
+            {"index": 1, "verdict": "confirmed", "evidence": "something not in the code at all"},
+            {"index": 2, "verdict": "refuted", "reason": "public docs route"}])
+        fs = [_authz_finding(), _authz_finding("GET /a"), _authz_finding("GET /docs")]
+        kept, ok = dsa.verify_findings("m", "o/r", fs, {"api/auth.py": AUTH_PY})
+        assert ok and [f["entry_point"] for f in kept] == ["GET /users/<id>"]
+
+    def test_failed_call_sends_nothing(self, monkeypatch):
+        self._llm(monkeypatch, raise_exc=True)
+        assert dsa.verify_findings("m", "o/r", [_authz_finding()], {"api/auth.py": AUTH_PY}) == ([], False)
+
+    def test_no_findings_needs_no_call(self, monkeypatch):
+        self._llm(monkeypatch, raise_exc=True)
+        assert dsa.verify_findings("m", "o/r", [], {"api/auth.py": AUTH_PY}) == ([], True)
+
+
+class TestRunAuditFailure:
+    def test_failed_model_call_is_not_an_audit(self, monkeypatch):
+        monkeypatch.setattr(dsa.waveassist, "call_llm", lambda **k: (_ for _ in ()).throw(RuntimeError("x")))
+        assert dsa.run_audit("m", "o/r", {}, {"a.py": "x"}) == ([], [], False)
+
+
+class TestAuditDriver:
+    """End to end over a fake GitHub: a failed model call must not count as an audit, and only a
+    verified finding reaches triage."""
+
+    def _run(self, monkeypatch, audit=None, verify=None, fail=False, github_down=False):
+        import base64, runpy, requests, waveassist
+        fetch_map = {"security_skip_run": "0", "github_access_token": "t",
+                     "security_resolved_groups": [{"slug": "g", "repos": ["o/r"]}],
+                     "security_audit_state": {}, "security_audit_queue": [], "security_findings": {}}
+        stored = {}
+
+        class R:
+            def __init__(self, data, code=200):
+                self.status_code, self._d = code, data
+
+            def json(self):
+                return self._d
+
+        def get(url, *a, **k):
+            if github_down and "/commits/" not in url:
+                return R({}, 502)
+            if "/git/trees/" in url:
+                return R({"tree": [{"type": "blob", "path": "api/auth.py", "size": 200}]})
+            if "/contents/" in url:
+                return R({"encoding": "base64", "content": base64.b64encode(AUTH_PY.encode()).decode()})
+            if "/commits/" in url:
+                return R({"sha": "abc"})
+            return R({}, 404)
+
+        def call_llm(**k):
+            if fail:
+                raise RuntimeError("provider down")
+            return audit if k["response_model"].__name__ == "AuditResult" else verify
+
+        monkeypatch.setattr(requests, "get", get)
+        monkeypatch.setattr(waveassist, "fetch_data", lambda key=None, default=None, **k: fetch_map.get(key, default))
+        monkeypatch.setattr(waveassist, "store_data", lambda key, value, **k: stored.__setitem__(key, value))
+        monkeypatch.setattr(waveassist, "call_llm", call_llm)
+        runpy.run_path("deep_security_audit.py", run_name="__main__")
+        return stored
+
+    def test_failed_audit_is_retried_not_recorded(self, monkeypatch):
+        stored = self._run(monkeypatch, fail=True)
+        assert "o/r" not in stored["security_audit_state"]
+        assert stored["security_candidates"] == [] and stored["security_scanned_ok_code"] == []
+
+    def test_only_verified_findings_reach_triage(self, monkeypatch):
+        audit = dsa.AuditResult.model_validate({"authz_findings": [
+            {"entry_point": "GET /users/<id>", "handler_file": "api/auth.py", "missing_check": "ownership",
+             "exploit_path": "call with another id", "named_victim": "any user", "reproduction": "GET /users/2",
+             "fix": "check owner", "impact": "reads any user's profile", "confidence": "high"},
+            {"entry_point": "GET /docs", "handler_file": "api/auth.py", "missing_check": "auth",
+             "exploit_path": "open it", "named_victim": "anyone", "reproduction": "GET /docs",
+             "fix": "add auth", "impact": "sees API docs", "confidence": "high"}]})
+        verify = dsa.VerifyResult.model_validate({"verdicts": [
+            {"index": 0, "verdict": "confirmed", "evidence": "return User.objects.get(id=user_id)"},
+            {"index": 1, "verdict": "refuted", "reason": "public docs"}]})
+        stored = self._run(monkeypatch, audit=audit, verify=verify)
+        assert [c["entry_point"] for c in stored["security_candidates"]] == ["GET /users/<id>"]
+        assert "o/r" in stored["security_audit_state"]
+
+    def test_github_failure_is_retried_not_recorded(self, monkeypatch):
+        stored = self._run(monkeypatch, fail=True, github_down=True)
+        assert "o/r" not in stored["security_audit_state"]

@@ -38,7 +38,9 @@ Finds real security holes in your code and dependencies, and emails you only whe
 * **Daily dependency and supply chain scan.** It reads your manifests and lockfiles, matches installed packages against the public [OSV.dev](https://osv.dev) vulnerability database, and cross checks each hit against the [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) feed, which flags what is being exploited right now.
 * **Weekly deep code audit.** A slower, deeper pass over your code for authorization holes, leaked secrets, and backdoors.
 * **Context, not noise.** Unlike a raw scanner, GitZoid reads each finding in the context of your repo, asking whether the package is actually used and whether it sits in an auth path, and reports only real, exploitable issues, each with who is affected and a fix you can run. When nothing is exploitable, it stays silent. Silence is the all clear.
-* **No repeats.** It never alerts you twice about an issue you have already seen. Once it has told you to upgrade a package, a new advisory on that same package does not trigger another email, because the fix is unchanged.
+* **No repeats.** It never alerts you twice about an issue you have already seen. Once it has told you to upgrade a package, a new advisory on that same package does not trigger another email, because the fix is unchanged (unless the new one is being exploited in the wild). A code issue the weekly audit skips one week and finds again later is not sent again.
+* **Checked before it is sent.** Every new code finding goes through a second pass that tries to disprove it and must quote the code that proves it. Public docs routes, publishable frontend keys, test and sample code, and placeholders are not reported on their own.
+* **Resolved only when fixed.** A code issue is marked resolved only when the audit quotes the current code that closes it, never just because the audit did not mention it again. If an alert email fails to send, it is retried on the next run.
 
 > How is this different from Dependabot or GitHub's built in scanning? Those raw scans are free and noisy. GitZoid reports only what is real and exploitable, with the fix to run.
 
@@ -99,8 +101,8 @@ GitZoid is a set of flat Python node scripts wired into three independent DAG ch
 | --- | --- |
 | `security_check_and_init.py` | Gates on credits and the `enable_security` toggle, then takes the run lock. |
 | `scan_dependencies.py` | Daily OSV and CISA KEV dependency and supply chain scan. |
-| `deep_security_audit.py` | Weekly deep code audit covering authz, secrets, and backdoors. |
-| `triage_and_alert.py` | The single gatekeeper. It dedupes against the persistent ledger, alerts again only on real escalation, and sends one consolidated email. Silent when clean. |
+| `deep_security_audit.py` | Weekly deep code audit covering authz, secrets, and backdoors. It is shown the issues already reported (to mark each still present or fixed, with quoted evidence) and runs a second pass that tries to refute each new finding. A failed model call is retried the next day, not counted as an audit. |
+| `triage_and_alert.py` | The single gatekeeper. It dedupes against the persistent ledger, alerts again only on real escalation, and sends one consolidated email. A finding counts as alerted only once its email goes out. Silent when clean. |
 
 ### Knowledge Digest chain (weekly, Monday 08:30 UTC)
 
@@ -172,11 +174,15 @@ Anything below the closing --- is passed to the reviewer as context.
 
 Inline list form also works: `ignore: [dist/**, "*.lock"]`.
 
+### Skip whole repos from the dashboard
+
+The **Skip PR reviews for these repos** setting (`review_skip_repos`, a list of `owner/repo` or `repo` names) turns PR review off for those repos without touching them. Security Watch and the Knowledge Digest still cover them. It takes effect on the next review cycle.
+
 ### Skip a single PR
 
 Add the **`gitzoid-skip`** label to any pull request and GitZoid will not review it. Handy for WIP, generated, or vendored PRs without changing repo config.
 
-> **Note:** Per-repo config is cached for about an hour to avoid re-fetching from GitHub on every ~2-minute cycle, so changes to `review.md` (including `skip`) take effect within ~1h.
+> **Note:** Per-repo config is cached for about six hours to avoid re-fetching from GitHub on every ~2-minute cycle, so changes to `review.md` (including `skip`) take effect within ~6h.
 
 ---
 

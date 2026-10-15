@@ -229,6 +229,18 @@ variables:
     default_value: "[]"
     helper_message: "Send a separate weekly digest per group, each to its own recipients. Leave empty for one digest of all repos."
 
+  # Repos whose pull requests GitZoid should NOT review. PR review only: Security Watch and the
+  # Knowledge Digest still cover these repos. Entries are "owner/repo" or just "repo". The same
+  # opt-out is available inside a repo via review.md front-matter (skip: true).
+  - name: review_skip_repos
+    key: review_skip_repos
+    display_name: "Skip PR reviews for these repos"
+    type: list
+    is_optional: true
+    depends_on: github
+    default_value: "[]"
+    helper_message: "GitZoid will not review pull requests in these repos. Security alerts and the digest still include them."
+
   - name: schedule
     key: schedule
     display_name: Review frequency

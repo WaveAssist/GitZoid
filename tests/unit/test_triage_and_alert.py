@@ -7,6 +7,7 @@ silent-if-empty rule.
 """
 import sys
 import os
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
@@ -26,6 +27,7 @@ from triage_and_alert import (
     clean_email_list,
     group_alerts,
     MAX_CODE_ALERTS,
+    MAX_RESOLVED_KEPT,
 )
 
 
@@ -384,11 +386,29 @@ class TestScannedOkCategoryScoped:
         assert resolved == []
         assert ledger[finding_sig(self._authz())]["status"] == "open"
 
-    def test_code_scan_resolves_code_finding(self):
+    def test_code_scan_alone_does_not_resolve_code_finding(self):
+        # The audit ran but did not repeat the finding: an LLM omission is not a fix.
         first, _, _ = reconcile_ledger({}, [self._authz()])
         ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_code={"o/r"})
+        assert resolved == []
+        assert ledger[finding_sig(self._authz())]["status"] == "open"
+
+    def test_code_finding_resolves_only_with_evidence(self):
+        first, _, _ = reconcile_ledger({}, [self._authz()])
+        sig = finding_sig(self._authz())
+        ledger, _, resolved = reconcile_ledger(
+            first, [], scanned_ok_code={"o/r"},
+            code_resolutions=[{"sig": sig, "evidence": "if not user.is_admin: raise PermissionDenied"}])
         assert len(resolved) == 1
-        assert ledger[finding_sig(self._authz())]["status"] == "resolved"
+        assert ledger[sig]["status"] == "resolved"
+        assert "is_admin" in ledger[sig]["resolution_evidence"]
+
+    def test_still_present_reopens_an_absence_resolved_finding(self):
+        first, _, _ = reconcile_ledger({}, [self._authz()])
+        sig = finding_sig(self._authz())
+        first[sig].update({"status": "resolved", "resolved_at": "2026-10-05T06:00:00+00:00"})  # legacy
+        ledger, to_alert, _ = reconcile_ledger(first, [], code_present=[sig])
+        assert to_alert == [] and ledger[sig]["status"] == "open" and "resolved_at" not in ledger[sig]
 
     def test_code_scan_does_not_resolve_dependency_finding(self):
         first, _, _ = reconcile_ledger({}, [_dep()])
@@ -804,3 +824,155 @@ class TestGroupedDelivery:
         assert disp.get("preview") is True
         assert disp.get("sent") == 0                                       # not counted as sent
         assert all(g.get("previewed") is True and g.get("sent") is False for g in disp["groups"])
+
+
+def _code_f(category="authz", repo="o/r", where="/acl/list", severity="high", impact="reads any user's data"):
+    """A code finding as deep_security_audit emits it: a location-based dedup_key, LLM-written prose."""
+    f = {"category": category, "repo": repo, "severity": severity, "impact": impact,
+         "fix": "add the check", "named_victim": "any user"}
+    if category == "authz":
+        f.update({"entry_point": where, "title": f"Bypassable check: {where}", "dedup_key": f"authz:{where}"})
+    else:
+        f.update({"path": where, "title": f"Live secret in {where}", "dedup_key": f"{category}:{where}"})
+    return f
+
+
+class TestNoRepeatCodeAlerts:
+    """The weekly audit is an LLM pass and skips findings some weeks. A skipped finding is resolved by
+    absence; when the audit reports it again weeks later it must NOT be emailed a second time."""
+
+    def _alert_then_skip(self, f):
+        """Alerted, then resolved by absence the way the old code did (still in live ledgers)."""
+        first, sent, _ = reconcile_ledger({}, [f], now=datetime(2026, 9, 7, tzinfo=timezone.utc))
+        assert len(sent) == 1
+        first[finding_sig(f)].update({"status": "resolved", "resolved_at": "2026-09-14T06:00:00+00:00"})
+        return first
+
+    def test_absence_no_longer_resolves(self):
+        first, _, _ = reconcile_ledger({}, [_code_f()])
+        ledger, to_alert, resolved = reconcile_ledger(first, [], scanned_ok_code={"o/r"})
+        assert resolved == [] and to_alert == []
+        assert ledger[finding_sig(_code_f())]["status"] == "open"
+
+    def test_refound_code_finding_not_realerted(self):
+        f = _code_f()
+        skipped = self._alert_then_skip(f)
+        back, to_alert, _ = reconcile_ledger(skipped, [_code_f(impact="reworded this week")],
+                                             now=datetime(2026, 10, 5, tzinfo=timezone.utc))
+        assert to_alert == []
+        e = back[finding_sig(f)]
+        assert e["status"] == "open" and "resolved_at" not in e
+        assert e["first_seen"].startswith("2026-09-07")     # still-open in the digest, not "new"
+        assert e["impact"] == "reads any user's data"        # keeps the text that was emailed
+
+    def test_refound_secret_not_realerted(self):
+        f = _code_f("secret", where="src/config/india.ts")
+        back, to_alert, _ = reconcile_ledger(self._alert_then_skip(f), [f])
+        assert to_alert == []
+
+    def test_refound_code_finding_realerts_once_when_worse(self):
+        f = _code_f()
+        worse = _code_f(severity="critical")
+        back, to_alert, _ = reconcile_ledger(self._alert_then_skip(f), [worse])
+        assert len(to_alert) == 1                            # got worse than what was alerted
+        gone, _, _ = reconcile_ledger(back, [], scanned_ok_code={"o/r"})
+        again, to_alert2, _ = reconcile_ledger(gone, [worse])
+        assert to_alert2 == []                               # ...but only once
+
+    def test_dependency_reappearing_still_alerts(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        gone, _, _ = reconcile_ledger(first, [], scanned_ok_deps={"o/r"})
+        _, to_alert, _ = reconcile_ledger(gone, [_dep()])
+        assert len(to_alert) == 1                            # deterministic feed: a real regression
+
+    def test_regrouped_secret_files_not_realerted(self):
+        f = _code_f("secret", where="apps/core/.env.production, apps/karma/.env.production")
+        first, _, _ = reconcile_ledger({}, [f], now=datetime(2026, 9, 21, tzinfo=timezone.utc))
+        regrouped = [_code_f("secret", where="apps/core/.env.production"),
+                     _code_f("secret", where="apps/karma/.env.production, apps/core/.env.production ")]
+        ledger, to_alert, _ = reconcile_ledger(first, regrouped, now=datetime(2026, 10, 12, tzinfo=timezone.utc))
+        assert to_alert == []
+        for g in regrouped:
+            e = ledger[finding_sig(g)]
+            assert e["status"] == "open" and e["covered_by_earlier_alert"] is True
+            assert e["first_seen"].startswith("2026-09-21")
+
+    def test_secret_naming_a_new_file_still_alerts(self):
+        first, _, _ = reconcile_ledger({}, [_code_f("secret", where="a/.env")])
+        _, to_alert, _ = reconcile_ledger(first, [_code_f("secret", where="a/.env, b/.env")])
+        assert len(to_alert) == 1
+
+    def test_same_file_other_repo_still_alerts(self):
+        first, _, _ = reconcile_ledger({}, [_code_f("secret", repo="o/a", where="src/config/india.ts")])
+        _, to_alert, _ = reconcile_ledger(first, [_code_f("secret", repo="o/b", where="src/config/india.ts")])
+        assert len(to_alert) == 1
+
+    def test_new_route_still_alerts(self):
+        first, _, _ = reconcile_ledger({}, [_code_f(where="/payment")])
+        _, to_alert, _ = reconcile_ledger(first, [_code_f(where="/slotconfig")])
+        assert len(to_alert) == 1
+
+    def test_resolved_code_memory_kept_past_dependency_cap(self):
+        ledger = {}
+        for i in range(70):
+            c, d = _code_f(where=f"/r{i}"), _dep(name=f"pkg{i}")
+            for f in (c, d):
+                e = {"sig": finding_sig(f), "category": f["category"], "repo": "o/r", "status": "resolved",
+                     "resolved_at": f"2026-09-{1 + i % 28:02d}T00:00:00+00:00", "alerted": True}
+                ledger[e["sig"]] = e
+        out, _, _ = reconcile_ledger(ledger, [])
+        assert sum(1 for e in out.values() if e["category"] == "authz") == 70
+        assert sum(1 for e in out.values() if e["category"] == "dependency") == MAX_RESOLVED_KEPT
+
+
+class TestAlertRetry:
+    """A finding is only 'alerted' once its email went out. The driver un-marks findings whose send
+    failed (or that a preview run only prepared); the next run alerts them again."""
+
+    def test_unsent_open_finding_is_alerted_again(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        first[finding_sig(_dep())]["alerted"] = False          # send failed last run
+        ledger, to_alert, _ = reconcile_ledger(first, [_dep()])
+        assert len(to_alert) == 1 and ledger[finding_sig(_dep())]["alerted"] is True
+
+    def test_unsent_code_finding_retried_even_when_not_refound(self):
+        f = _code_f()
+        first, _, _ = reconcile_ledger({}, [f])
+        first[finding_sig(f)]["alerted"] = False
+        _, to_alert, _ = reconcile_ledger(first, [])            # daily run, no audit
+        assert len(to_alert) == 1
+
+    def test_legacy_entries_without_flag_are_not_retried(self):
+        first, _, _ = reconcile_ledger({}, [_dep()])
+        first[finding_sig(_dep())].pop("alerted")
+        _, to_alert, _ = reconcile_ledger(first, [_dep()])
+        assert to_alert == []
+
+    def _run(self, monkeypatch, send_ok, preview=False):
+        import runpy, waveassist
+        cand = [{"category": "dependency", "repo": "o/r", "name": "x", "version": "1", "vuln_id": "CVE-9",
+                 "severity": "high", "fixed": "1.1", "impact": "y", "actively_exploited": False}]
+        ledger = {}
+        fetch_map = {"security_skip_run": "0", "security_candidates": cand, "github_selected_resources": [{"id": "o/r"}]}
+
+        def fetch(key=None, default=None, **k):
+            return ledger.get("v", default) if key == "security_findings" else fetch_map.get(key, default)
+
+        def store(key, value, **k):
+            if key == "security_findings":
+                ledger["v"] = {s: dict(e) for s, e in value.items()}
+        monkeypatch.setattr(waveassist, "fetch_data", fetch)
+        monkeypatch.setattr(waveassist, "store_data", store)
+        monkeypatch.setattr(waveassist, "send_email", lambda **k: send_ok)
+        monkeypatch.setattr(waveassist, "is_test_run", lambda: preview)
+        runpy.run_path("triage_and_alert.py", run_name="__main__")
+        return ledger["v"][finding_sig(cand[0])]
+
+    def test_failed_send_leaves_finding_unalerted(self, monkeypatch):
+        assert self._run(monkeypatch, send_ok=False)["alerted"] is False
+
+    def test_preview_run_leaves_finding_unalerted(self, monkeypatch):
+        assert self._run(monkeypatch, send_ok=True, preview=True)["alerted"] is False
+
+    def test_delivered_send_marks_alerted(self, monkeypatch):
+        assert self._run(monkeypatch, send_ok=True)["alerted"] is True

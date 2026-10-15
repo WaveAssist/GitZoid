@@ -1,3 +1,4 @@
+import json
 import fnmatch
 from datetime import datetime, timezone, timedelta
 import requests
@@ -22,8 +23,12 @@ MAX_COMMENTS = 30                 # newest N comments kept before the char cap
 MAX_FOCUS_ITEMS = 20
 MAX_FOCUS_ITEM_CHARS = 200        # cap each focus string so a control list can't bloat the prompt
 REVIEW_FETCH_TIMEOUT = 10
-REVIEW_CONFIG_TTL_SECONDS = 3600  # cache per-repo review config so we don't re-probe GitHub every
-                                  # 2-min run; controls (skip/ignore/...) take effect within ~1h
+REVIEW_CONFIG_TTL_SECONDS = 21600  # cache per-repo review config so we don't re-probe GitHub every
+                                   # 2-min run; controls (skip/ignore/...) take effect within ~6h
+PR_LIST_CACHE_KEY = "pr_list_cache"  # {repo: {"etag", "prs"}}: last open-PR list per repo, for 304s
+PR_PATCH_BUDGET_CHARS = 150_000    # diff text queued per PR; the review prompt uses ~50K, smallest files first
+QUEUE_MAX_BYTES = 2_000_000        # the platform API rejects request bodies over 2.5 MB
+_LIST_STATS = {"unchanged": 0, "fetched": 0, "failed": 0}   # per run, for the log line
 SKIP_LABEL = "gitzoid-skip"       # a PR carrying this label is not reviewed
 # Bot logins whose comments are noise in the "existing discussion" context (mirrors is_bot_pr).
 _COMMENT_BOT_LOGINS = {
@@ -40,6 +45,65 @@ def _has_next_page(resp) -> bool:
     'no next page', so legacy single-response mocks stay single-page instead of looping forever."""
     links = getattr(resp, "links", None)
     return isinstance(links, dict) and "next" in links
+
+
+def _slim_pr(pr: dict) -> dict:
+    """The fields of a GitHub PR-list item that this node uses, so the cached list stays small."""
+    user = pr.get("user") or {}
+    return {"number": pr.get("number"), "title": pr.get("title"), "body": pr.get("body"),
+            "created_at": pr.get("created_at"), "updated_at": pr.get("updated_at"),
+            "draft": pr.get("draft"),
+            "labels": [{"name": (lb or {}).get("name")} for lb in (pr.get("labels") or [])],
+            "user": {"login": user.get("login"), "type": user.get("type")},
+            "head": {"sha": (pr.get("head") or {}).get("sha")}}
+
+
+def list_open_prs(repo_path: str, headers: dict, list_cache: dict = None):
+    """Open PRs of a repo as slim dicts, or None when GitHub refused. With `list_cache`, the request is
+    conditional: the ETag of the last list goes in If-None-Match, and a 304 (nothing changed) reuses
+    the cached list. GitHub does not count 304s against the hourly rate limit, so polling ~130 repos
+    every 2 minutes costs a request only for repos whose open PRs actually changed. Only single-page
+    lists are cached (more than 100 open PRs falls back to a plain fetch)."""
+    cached = (list_cache or {}).get(repo_path) if list_cache is not None else None
+    usable = isinstance(cached, dict) and isinstance(cached.get("etag"), str) and isinstance(cached.get("prs"), list)
+    url = f"https://api.github.com/repos/{repo_path}/pulls"
+    params = {"state": "open", "sort": "created", "direction": "desc", "per_page": 100, "page": 1}
+    open_prs, etag = [], None
+    while True:
+        req_headers = dict(headers)
+        if usable and params["page"] == 1:
+            req_headers["If-None-Match"] = cached["etag"]
+        response = requests.get(url, headers=req_headers, params=params, timeout=30)
+        if response.status_code == 304 and usable and params["page"] == 1:
+            _LIST_STATS["unchanged"] += 1
+            return cached["prs"]
+        if response.status_code != 200:
+            _LIST_STATS["failed"] += 1
+            print(f"❌ Failed to fetch PRs for {repo_path}: {response.status_code}")
+            return None
+        try:
+            page_prs = response.json()
+        except Exception as e:
+            print(f"❌ Invalid PR JSON response: {e}")
+            return None
+        if params["page"] == 1:
+            hdrs = getattr(response, "headers", None)
+            tag = hdrs.get("ETag") if hasattr(hdrs, "get") else None
+            etag = tag if isinstance(tag, str) else None
+        if not page_prs:
+            break
+        open_prs.extend(page_prs)
+        if not _has_next_page(response):
+            break
+        params["page"] += 1
+    _LIST_STATS["fetched"] += 1
+    slim = [_slim_pr(p) for p in open_prs]
+    if list_cache is not None:
+        if etag and params["page"] == 1:
+            list_cache[repo_path] = {"etag": etag, "prs": slim}
+        else:
+            list_cache.pop(repo_path, None)
+    return slim
 
 
 def fetch_compare_diff(repo_path: str, base_sha: str, head_sha: str, headers: dict) -> list:
@@ -370,6 +434,37 @@ def _fetch_reviewable_files(repo_path, pr_number, headers, ignore_globs):
     return files, (bool(raw) and not files)
 
 
+def cap_patches(files: list, budget: int = PR_PATCH_BUDGET_CHARS) -> list:
+    """Keep the diff text of the smallest files up to `budget` characters (the same smallest-first
+    order the review prompt uses) and drop it from the rest, keeping filename, status and line counts.
+    A 1,017-file PR made one project's review queue 12 MB, over the API's 2.5 MB limit; the save failed
+    silently and no PR in that project was reviewed for days."""
+    out = [dict(f) for f in (files or [])]
+    used = 0
+    for i in sorted(range(len(out)), key=lambda i: len(out[i].get("patch") or "")):
+        n = len(out[i].get("patch") or "")
+        if used + n <= budget:
+            used += n
+        else:
+            out[i]["patch"] = ""
+            out[i]["patch_omitted"] = True
+    return out
+
+
+def fit_queue(prs: list, max_bytes: int = QUEUE_MAX_BYTES) -> tuple:
+    """Keep the queue under the API's request limit: if it is too big, defer the largest PRs to a later
+    cycle (they are re-queued next time) so the rest still get reviewed. Returns (kept, deferred_count)."""
+    sizes = [len(json.dumps(p)) + 1 for p in prs]
+    if sum(sizes) + 2 <= max_bytes:
+        return prs, 0
+    keep, total = set(), 2
+    for i in sorted(range(len(prs)), key=lambda i: sizes[i]):
+        if total + sizes[i] <= max_bytes:
+            keep.add(i)
+            total += sizes[i]
+    return [p for i, p in enumerate(prs) if i in keep], len(prs) - len(keep)
+
+
 def build_pr_data(
     pr: dict,
     processed_files: list,
@@ -389,7 +484,7 @@ def build_pr_data(
         "title": pr.get("title"),
         "body": pr.get("body"),
         "pr_created_at": pr.get("created_at"),
-        "files": processed_files,
+        "files": cap_patches(processed_files),
         "review_type": review_type,
         "current_sha": current_sha,
     }
@@ -416,11 +511,13 @@ def build_pr_data(
 def fetch_and_process_prs(
     repo_metadata: dict, 
     access_token: str, 
-    reviewed_prs: dict
+    reviewed_prs: dict,
+    list_cache: dict = None
 ) -> tuple[list, bool]:
     """
     Fetch and process all PRs for a repo.
-    Returns (list of PRs to review, reviewed_prs_changed flag).
+    Returns (list of PRs to review, reviewed_prs_changed flag). `list_cache` (see list_open_prs)
+    makes the open-PR listing a conditional request.
     """
     repo_path = repo_metadata["id"]
     headers = {
@@ -443,32 +540,10 @@ def fetch_and_process_prs(
     # Detect first run
     is_first_run = is_first_run_for_repo(repo_path, reviewed_prs)
     
-    # Fetch all open PRs (single API call)
-    prs_url = f"https://api.github.com/repos/{repo_path}/pulls"
-    params = {
-        "state": "open",
-        "sort": "created",
-        "direction": "desc",
-        "per_page": 100,  # Get all open PRs
-    }
-    open_prs = []
-    params["page"] = 1
-    while True:
-        response = requests.get(prs_url, headers=headers, params=params, timeout=30)
-        if response.status_code != 200:
-            print(f"❌ Failed to fetch PRs for {repo_path}: {response.status_code}")
-            return [], False
-        try:
-            page_prs = response.json()
-        except Exception as e:
-            print(f"❌ Invalid PR JSON response: {e}")
-            return [], False
-        if not page_prs:
-            break
-        open_prs.extend(page_prs)
-        if not _has_next_page(response):
-            break
-        params["page"] += 1
+    # Fetch all open PRs (one conditional request; a 304 reuses the cached list)
+    open_prs = list_open_prs(repo_path, headers, list_cache)
+    if open_prs is None:
+        return [], False
     
     # Build lookup
     open_pr_numbers = {pr["number"] for pr in open_prs}
@@ -620,6 +695,29 @@ def fetch_and_process_prs(
     return prs_to_review, reviewed_prs_changed
 
 
+def parse_repo_list(value):
+    """The `review_skip_repos` setting -> lowercased repo names. Accepts a list (dashboard list input)
+    or a JSON / comma / newline separated string. Entries may be "owner/repo" or just "repo"."""
+    import json
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = json.loads(text) if text.startswith("[") else None
+        except ValueError:
+            value = None
+        if value is None:
+            value = text.replace("\n", ",").split(",")
+    return {str(v).strip().lower() for v in (value or []) if str(v).strip()}
+
+
+def review_skipped(repo, skip_set) -> bool:
+    """True when the repo (a github_selected_resources item or "owner/repo") is listed in
+    `review_skip_repos`, by full name or by bare repo name. Only PR review skips it: security scans
+    and the digest still cover the repo."""
+    full = str((repo.get("id") if isinstance(repo, dict) else repo) or "").lower()
+    return bool(full) and (full in skip_set or full.split("/")[-1] in skip_set)
+
+
 # Single-run lock (set by check_credits_and_init): if another run holds it, no-op (empty repo list
 # means no PRs are queued, so generate_review / post_comment downstream also no-op).
 skip_run = waveassist.fetch_data("skip_run", run_based=True, default="0") == "1"
@@ -628,19 +726,43 @@ if skip_run:
 
 # Fetch input from WaveAssist
 repositories = [] if skip_run else (waveassist.fetch_data("github_selected_resources") or [])
+# Repos opted out of PR review from the dashboard (security and digest still cover them).
+review_skip = parse_repo_list(waveassist.fetch_data("review_skip_repos", default="") or "")
+if review_skip:
+    _skipped = [r for r in repositories if review_skipped(r, review_skip)]
+    repositories = [r for r in repositories if not review_skipped(r, review_skip)]
+    if _skipped:
+        print(f"⏭️  PR review off for {len(_skipped)} repo(s) by setting: "
+              + ", ".join(str(r.get("id") if isinstance(r, dict) else r) for r in _skipped))
 access_token = waveassist.fetch_data("github_access_token") or ""
 
 # Fetch existing reviewed PRs tracker
 reviewed_prs = waveassist.fetch_data("reviewed_prs") or {}
 
+# Last open-PR list + ETag per repo, so unchanged repos cost a free 304 instead of a counted request.
+pr_list_cache = {} if skip_run else (waveassist.fetch_data(PR_LIST_CACHE_KEY, default={}) or {})
+if not isinstance(pr_list_cache, dict):
+    pr_list_cache = {}
+etags_before = {k: (v or {}).get("etag") for k, v in pr_list_cache.items()}
+
 all_pull_requests = []
 reviewed_prs_changed = False
 
 for repo in repositories:
-    prs, changed = fetch_and_process_prs(repo, access_token, reviewed_prs)
+    prs, changed = fetch_and_process_prs(repo, access_token, reviewed_prs, list_cache=pr_list_cache)
     all_pull_requests.extend(prs)
     if changed:
         reviewed_prs_changed = True
+
+if not skip_run:
+    # Keep only repos still reviewed, and save only when some repo's list actually changed.
+    current = {str(r.get("id") if isinstance(r, dict) else r) for r in repositories}
+    pr_list_cache = {k: v for k, v in pr_list_cache.items() if k in current}
+    if {k: (v or {}).get("etag") for k, v in pr_list_cache.items()} != etags_before:
+        waveassist.store_data(PR_LIST_CACHE_KEY, pr_list_cache, data_type="json")
+    if repositories:
+        print(f"GitHub PR lists: {_LIST_STATS['unchanged']} unchanged (304, not counted), "
+              f"{_LIST_STATS['fetched']} fetched, {_LIST_STATS['failed']} failed")
 
 # Store reviewed_prs only if changed
 if reviewed_prs_changed:
@@ -650,7 +772,12 @@ if not skip_run:
     # Publish the current queue even when empty so an opt-out (repo skip / gitzoid-skip label) or a
     # PR that closed since last run actually CLEARS a stale queue from a prior run. Under skip_run
     # another run owns the queue, so we leave it untouched (repositories is [] there anyway).
-    waveassist.store_data("pull_requests", all_pull_requests)
+    all_pull_requests, deferred = fit_queue(all_pull_requests)
+    if deferred:
+        print(f"⚠️ Review queue too large; {deferred} PR(s) deferred to a later cycle.")
+    if waveassist.store_data("pull_requests", all_pull_requests) is False:
+        print(f"❌ Could not save the review queue ({len(all_pull_requests)} PR(s)); "
+              f"nothing is reviewed this cycle.")
     if all_pull_requests:
         time_to_process = len(all_pull_requests) * PROCESSING_TIME_PER_PR
         waveassist.store_data(
